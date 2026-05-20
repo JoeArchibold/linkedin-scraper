@@ -71,6 +71,16 @@ High-level flow:
 6. Save it as `scripts/auth/google_credentials.json`.
 7. Run `python setup_auth.py` and complete the browser consent flow.
 
+Important testing-mode behavior: for an OAuth consent screen configured as
+External with publishing status `Testing`, Google issues refresh tokens that
+expire after 7 days for non-profile scopes such as Google Sheets. In this
+project, that means `scripts/auth/google_token.json` may stop working weekly.
+The downloaded OAuth client file, `google_credentials.json`, does not usually
+need to be recreated; delete or replace `google_token.json` and re-run
+`python setup_auth.py` to complete consent again. Moving the app to production
+avoids the 7-day testing-token expiration, subject to Google's app verification
+requirements for the scopes used.
+
 Detailed steps:
 
 1. Open the Google Cloud Console:
@@ -166,6 +176,11 @@ If the browser opens but Google blocks the app, check that the OAuth consent
 screen is configured and that your Google account is added as a test user when
 the app is in testing mode.
 
+If Google auth works for about a week and then starts failing with an expired
+or revoked token error, the OAuth app is probably still in Testing mode. Delete
+`scripts/auth/google_token.json` and run `python setup_auth.py` again to create
+a fresh user token.
+
 If Google Sheets returns a permission error, confirm that:
 
 - The Google Sheets API is enabled in the same Cloud project that created the OAuth client.
@@ -180,4 +195,3 @@ has expired. Re-run:
 cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts
 python setup_auth.py
 ```
-
