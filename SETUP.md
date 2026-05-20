@@ -6,6 +6,11 @@ can run headlessly:
 1. A saved LinkedIn browser session for Playwright.
 2. A Google OAuth client and user token for writing to Google Sheets.
 
+LinkedIn session state and the Google OAuth user token are stored in the local
+OS credential store through Python's `keyring` package. On Windows this usually
+uses Windows Credential Manager. The Google OAuth client JSON downloaded from
+Google Cloud Console remains a local bootstrap file.
+
 The setup script is:
 
 ```powershell
@@ -13,19 +18,20 @@ cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts
 python setup_auth.py
 ```
 
-## Local Files
+## Local Auth State
 
-The auth setup creates or uses these local files:
+The auth setup creates or uses these local values:
 
-| File | Purpose |
-|------|---------|
+| Location | Purpose |
+|----------|---------|
 | `scripts/.env` | Spreadsheet ID and worksheet tab name. Create this from `scripts/.env.example`. |
-| `scripts/auth/linkedin_state.json` | Playwright storage state for LinkedIn, including cookies and localStorage. |
 | `scripts/auth/google_credentials.json` | OAuth client configuration downloaded from Google Cloud Console. |
-| `scripts/auth/google_token.json` | Cached Google user OAuth token created after browser consent. |
+| OS credential store: `linkedin-games-data-collector` / `linkedin_state` | Playwright storage state for LinkedIn, including cookies and localStorage. |
+| OS credential store: `linkedin-games-data-collector` / `google_token` | Cached Google user OAuth token created after browser consent. |
 
-These files are intentionally ignored by Git because they contain local secrets
-or machine-specific runtime state.
+The local files under `scripts/auth/` are intentionally ignored by Git. Existing
+legacy `linkedin_state.json` and `google_token.json` files are imported into the
+OS credential store automatically if the keyring entry is missing.
 
 ## Python Dependencies
 
@@ -74,11 +80,11 @@ High-level flow:
 Important testing-mode behavior: for an OAuth consent screen configured as
 External with publishing status `Testing`, Google issues refresh tokens that
 expire after 7 days for non-profile scopes such as Google Sheets. In this
-project, that means `scripts/auth/google_token.json` may stop working weekly.
-The downloaded OAuth client file, `google_credentials.json`, does not usually
-need to be recreated; delete or replace `google_token.json` and re-run
-`python setup_auth.py` to complete consent again. Moving the app to production
-avoids the 7-day testing-token expiration, subject to Google's app verification
+project, that means the stored `google_token` keyring entry may stop working
+weekly. The downloaded OAuth client file, `google_credentials.json`, does not
+usually need to be recreated; re-run `python setup_auth.py` to complete consent
+again and replace the keyring token. Moving the app to production avoids the
+7-day testing-token expiration, subject to Google's app verification
 requirements for the scopes used.
 
 Detailed steps:
@@ -108,6 +114,7 @@ Google's official references:
 - Google Sheets API Python quickstart: <https://developers.google.com/workspace/sheets/api/quickstart/python>
 - Create Google Workspace credentials: <https://developers.google.com/workspace/guides/create-credentials>
 - Enable Google Workspace APIs: <https://developers.google.com/workspace/guides/enable-apis>
+- Google OAuth refresh token expiration: <https://developers.google.com/identity/protocols/oauth2#expiration>
 
 ## What `setup_auth.py` Does
 
@@ -122,12 +129,13 @@ and press Enter.
 The script then saves Playwright's browser storage state to:
 
 ```text
-scripts/auth/linkedin_state.json
+OS credential store: linkedin-games-data-collector / linkedin_state
 ```
 
-That file contains LinkedIn cookies and localStorage. Treat it like a password.
-Anyone with that file may be able to reuse the logged-in session until LinkedIn
-expires or invalidates it.
+That keyring entry contains LinkedIn cookies and localStorage. Treat it like a
+password. Any process running as your local user may be able to retrieve it
+through the same credential-store API until LinkedIn expires or invalidates the
+session.
 
 ### Step 2: Google Sheets Authentication
 
@@ -144,12 +152,12 @@ permission.
 After consent succeeds, the script writes:
 
 ```text
-scripts/auth/google_token.json
+OS credential store: linkedin-games-data-collector / google_token
 ```
 
 That token is reused on later runs. If it expires and has a refresh token, the
-script refreshes it automatically. If it cannot be refreshed, run
-`python setup_auth.py` again.
+script refreshes it automatically and saves the refreshed token back to keyring.
+If it cannot be refreshed, run `python setup_auth.py` again.
 
 ## First Run Check
 
@@ -177,9 +185,8 @@ screen is configured and that your Google account is added as a test user when
 the app is in testing mode.
 
 If Google auth works for about a week and then starts failing with an expired
-or revoked token error, the OAuth app is probably still in Testing mode. Delete
-`scripts/auth/google_token.json` and run `python setup_auth.py` again to create
-a fresh user token.
+or revoked token error, the OAuth app is probably still in Testing mode. Re-run
+`python setup_auth.py` to create a fresh user token.
 
 If Google Sheets returns a permission error, confirm that:
 

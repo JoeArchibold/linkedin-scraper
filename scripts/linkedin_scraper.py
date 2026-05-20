@@ -2,7 +2,8 @@
 LinkedIn Games scraper using Playwright + BeautifulSoup.
 
 Loads a saved browser state (cookies) so no interactive login is needed
-on normal runs. Call setup_auth.py once to create the state file.
+on normal runs. Call setup_auth.py once to save the state in the OS credential
+store.
 """
 
 import re
@@ -14,6 +15,11 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
+from auth_store import (
+    LINKEDIN_STATE_KEY,
+    get_linkedin_state,
+    import_json_file_if_missing,
+)
 from config import GAMES, LINKEDIN_STATE_FILE
 
 logger = logging.getLogger(__name__)
@@ -190,9 +196,14 @@ def fetch_all_scores(
 
     debug_dir: save a screenshot + HTML dump for every page visited when set.
     """
-    if not LINKEDIN_STATE_FILE.exists():
+    imported = import_json_file_if_missing(LINKEDIN_STATE_KEY, LINKEDIN_STATE_FILE)
+    if imported:
+        logger.info("Imported legacy LinkedIn session file into the OS credential store.")
+
+    linkedin_state = get_linkedin_state()
+    if linkedin_state is None:
         raise FileNotFoundError(
-            f"LinkedIn session file not found: {LINKEDIN_STATE_FILE}\n"
+            "LinkedIn session not found in the OS credential store.\n"
             "Run setup_auth.py first to log in and save your session."
         )
 
@@ -202,7 +213,7 @@ def fetch_all_scores(
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         context: BrowserContext = browser.new_context(
-            storage_state=str(LINKEDIN_STATE_FILE),
+            storage_state=linkedin_state,
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "

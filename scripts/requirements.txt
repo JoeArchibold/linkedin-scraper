@@ -6,3 +6,4 @@ google-auth-oauthlib>=1.2.0
 python-dotenv>=1.0.0
 tzlocal>=4.0
 tzdata>=2024.1
+keyring>=25.0.0

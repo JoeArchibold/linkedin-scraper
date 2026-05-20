@@ -2,7 +2,8 @@
 Google Sheets updater for LinkedIn Games scores.
 
 Uses OAuth2 (gspread + google-auth-oauthlib). On first run it opens a
-browser for the one-time consent flow and caches a token in auth/.
+browser for the one-time consent flow and caches a token in the OS credential
+store.
 Subsequent runs are fully headless.
 
 Spreadsheet layout:
@@ -18,6 +19,7 @@ Spreadsheet layout:
 """
 
 import logging
+import json
 from datetime import date, datetime
 from typing import Optional
 
@@ -34,6 +36,12 @@ from config import (
     GOOGLE_CREDENTIALS_FILE,
     GOOGLE_TOKEN_FILE,
 )
+from auth_store import (
+    GOOGLE_TOKEN_KEY,
+    get_google_token_json,
+    import_json_file_if_missing,
+    save_google_token_json,
+)
 from linkedin_scraper import GameResult
 
 logger = logging.getLogger(__name__)
@@ -49,8 +57,13 @@ def _get_credentials() -> Credentials:
     """Return valid OAuth2 credentials, refreshing or re-authorising as needed."""
     creds: Optional[Credentials] = None
 
-    if GOOGLE_TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_FILE), SCOPES)
+    imported = import_json_file_if_missing(GOOGLE_TOKEN_KEY, GOOGLE_TOKEN_FILE)
+    if imported:
+        logger.info("Imported legacy Google token file into the OS credential store.")
+
+    token_json = get_google_token_json()
+    if token_json:
+        creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -70,8 +83,8 @@ def _get_credentials() -> Credentials:
             creds = flow.run_local_server(port=0)
 
         # Cache for next run
-        GOOGLE_TOKEN_FILE.write_text(creds.to_json())
-        logger.info(f"Google token saved to {GOOGLE_TOKEN_FILE}")
+        save_google_token_json(creds.to_json())
+        logger.info("Google token saved to the OS credential store.")
 
     return creds
 

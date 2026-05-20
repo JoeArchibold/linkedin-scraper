@@ -3,9 +3,9 @@ One-time setup script. Run this before using main.py.
 
 It does two things:
   1. Opens a visible Chromium browser so you can log in to LinkedIn,
-     then saves the session state (cookies) to auth/linkedin_state.json.
+     then saves the session state (cookies) to the OS credential store.
   2. Triggers the Google OAuth2 consent flow and saves a token to
-     auth/google_token.json.
+     the OS credential store.
 
 After this runs successfully, main.py can run fully headless.
 """
@@ -14,7 +14,8 @@ import sys
 import logging
 from playwright.sync_api import sync_playwright
 
-from config import LINKEDIN_STATE_FILE, GOOGLE_CREDENTIALS_FILE
+from config import GOOGLE_CREDENTIALS_FILE
+from auth_store import save_linkedin_state
 from sheets_updater import _get_credentials
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
@@ -46,8 +47,8 @@ def setup_linkedin() -> None:
 
         input("\n>>> Press ENTER after you have logged in to LinkedIn ... ")
 
-        context.storage_state(path=str(LINKEDIN_STATE_FILE))
-        logger.info(f"LinkedIn session saved to {LINKEDIN_STATE_FILE}")
+        save_linkedin_state(context.storage_state())
+        logger.info("LinkedIn session saved to the OS credential store.")
         browser.close()
 
 
@@ -74,7 +75,7 @@ def setup_google() -> None:
     logger.info("A browser window will open for Google consent.")
     logger.info("Sign in with the account that owns the spreadsheet.")
     _get_credentials()
-    logger.info("Google token saved successfully.")
+    logger.info("Google token saved to the OS credential store.")
 
 
 if __name__ == "__main__":

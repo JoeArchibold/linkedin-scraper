@@ -49,4 +49,4 @@ If the LinkedIn session has expired, or Google OAuth needs to be refreshed inter
 cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts && python setup_auth.py
 ```
 
-Sensitive local runtime files are intentionally ignored by Git, including `scripts/auth/`, `scripts/.env`, debug dumps, and local CSV output.
+Sensitive auth state is stored in the local OS credential store via `keyring`. Local runtime files are intentionally ignored by Git, including `scripts/auth/`, `scripts/.env`, debug dumps, and local CSV output.

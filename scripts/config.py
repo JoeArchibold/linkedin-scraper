@@ -16,13 +16,13 @@ SCRIPTS_DIR = Path(__file__).parent
 AUTH_DIR = SCRIPTS_DIR / "auth"
 AUTH_DIR.mkdir(exist_ok=True)
 
-# Playwright browser state (cookies + localStorage) saved after first login
+# Legacy Playwright browser state file. Existing files are imported into keyring.
 LINKEDIN_STATE_FILE = AUTH_DIR / "linkedin_state.json"
 
 # Google OAuth2 credentials downloaded from Google Cloud Console
 GOOGLE_CREDENTIALS_FILE = AUTH_DIR / "google_credentials.json"
 
-# Google OAuth2 token cached after first browser auth flow
+# Legacy Google OAuth2 token file. Existing files are imported into keyring.
 GOOGLE_TOKEN_FILE = AUTH_DIR / "google_token.json"
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
