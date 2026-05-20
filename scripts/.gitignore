@@ -1,0 +1,27 @@
+# Auth secrets and tokens - never commit these
+auth/
+
+# Debug output (screenshots + HTML dumps)
+debug/
+
+# Backup folder
+backup/
+
+# Any stray credential/token files in the root scripts dir
+*.json
+*.token
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Environment variable files
+.env
+.env.*
+!.env.example
