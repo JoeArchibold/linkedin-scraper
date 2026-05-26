@@ -16,13 +16,15 @@ SCRIPTS_DIR = Path(__file__).parent
 AUTH_DIR = SCRIPTS_DIR / "auth"
 AUTH_DIR.mkdir(exist_ok=True)
 
-# Legacy Playwright browser state file. Existing files are imported into keyring.
+# Legacy Playwright browser state file. If present, it is migrated into the
+# encrypted store on first run and can then be deleted.
 LINKEDIN_STATE_FILE = AUTH_DIR / "linkedin_state.json"
 
 # Google OAuth2 credentials downloaded from Google Cloud Console
 GOOGLE_CREDENTIALS_FILE = AUTH_DIR / "google_credentials.json"
 
-# Legacy Google OAuth2 token file. Existing files are imported into keyring.
+# Legacy Google OAuth2 token file. If present, it is migrated into the
+# encrypted store on first run and can then be deleted.
 GOOGLE_TOKEN_FILE = AUTH_DIR / "google_token.json"
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
