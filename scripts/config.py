@@ -38,52 +38,54 @@ if not SPREADSHEET_ID:
     )
 
 # ── LinkedIn Games ─────────────────────────────────────────────────────────────
+# `key` is the stable identifier used by sheet_layout.json. `name` is the
+# human-readable display name used for log lines, scraper lookups, and as the
+# base for column headers.
 GAMES = [
     {
+        "key":     "zip",
         "name":    "Zip",
         "url":     "https://www.linkedin.com/games/zip/results/",
         "is_time": True,   # True = MM:SS score, False = integer guesses (Pinpoint)
     },
     {
+        "key":     "tango",
         "name":    "Tango",
         "url":     "https://www.linkedin.com/games/tango/results/",
         "is_time": True,
     },
     {
+        "key":     "queens",
         "name":    "Queens",
         "url":     "https://www.linkedin.com/games/queens/results/",
         "is_time": True,
     },
     {
+        "key":     "patches",
         "name":    "Patches",
         "url":     "https://www.linkedin.com/games/patches/results/",
         "is_time": True,
     },
     {
+        "key":     "mini_sudoku",
         "name":    "Mini Sudoku",
         "url":     "https://www.linkedin.com/games/mini-sudoku/results/",
         "is_time": True,
     },
     {
+        "key":     "crossclimb",
         "name":    "CrossClimb",
         "url":     "https://www.linkedin.com/games/crossclimb/results/",
         "is_time": True,
     },
     {
+        "key":     "pinpoint",
         "name":    "Pinpoint",
         "url":     "https://www.linkedin.com/games/pinpoint/results/",
         "is_time": False,  # Returns guesses (integer), not a time
     },
 ]
 
-# Google Sheets column layout (score col, avg col) for each game in order
-# Columns: A=date, B=Zip, C=ZipAvg, D=Tango, E=TangoAvg, ... N=Pinpoint, O=PinpointAvg, P=DayOfWeek
-SHEET_COLUMNS = [
-    ("B", "C"),   # Zip
-    ("D", "E"),   # Tango
-    ("F", "G"),   # Queens
-    ("H", "I"),   # Patches
-    ("J", "K"),   # Mini Sudoku
-    ("L", "M"),   # CrossClimb
-    ("N", "O"),   # Pinpoint
-]
+# Path to the JSON layout file that controls which games appear in the output,
+# in what order, and whether puzzle numbers are written. See sheet_layout.py.
+SHEET_LAYOUT_FILE = SCRIPTS_DIR / "sheet_layout.json"

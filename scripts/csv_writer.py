@@ -4,10 +4,9 @@ CSV writer for LinkedIn Games scores.
 Provides the same interface as sheets_updater (get_today_state / write) but
 targets a local CSV file instead of Google Sheets.
 
-Column layout mirrors the spreadsheet exactly:
-  Date, Zip, ZipAvg, Tango, TangoAvg, Queens, QueensAvg,
-  Patches, PatchesAvg, MiniSudoku, MiniSudokuAvg,
-  CrossClimb, CrossClimbAvg, Pinpoint, PinpointAvg, DayOfWeek
+Column layout follows sheet_layout.json so the CSV stays in sync with the
+spreadsheet structure. The first row of the CSV is the header line and is the
+source of truth when reading/updating an existing file.
 """
 
 import csv
@@ -16,101 +15,130 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from config import GAMES, SHEET_COLUMNS
+from config import GAMES
+from sheet_layout import Layout, column_map_from_headers, load_layout
 from linkedin_scraper import GameResult
 
 logger = logging.getLogger(__name__)
-
-# Header row — built from GAMES config so it stays in sync automatically
-HEADERS = ["Date"]
-for game in GAMES:
-    col_name = game["name"].replace(" ", "")
-    HEADERS += [col_name, f"{col_name}Avg"]
-HEADERS.append("DayOfWeek")
 
 
 def _today_str(today: date) -> str:
     return f"{today.month}/{today.day}/{today.year}"
 
 
-def _read_rows(csv_path: Path) -> list[dict]:
-    """Return all rows as a list of dicts, or [] if the file doesn't exist."""
+def _layout_headers(layout: Layout) -> list[str]:
+    return [c.header for c in layout.columns]
+
+
+def _read_rows(csv_path: Path) -> tuple[list[str], list[list[str]]]:
+    """Return (headers, rows). Empty lists if the file doesn't exist."""
     if not csv_path.exists():
-        return []
+        return [], []
     with csv_path.open(newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        reader = csv.reader(f)
+        rows = list(reader)
+    if not rows:
+        return [], []
+    return rows[0], rows[1:]
+
+
+def _key_to_index(headers: list[str], layout: Layout) -> dict[str, int]:
+    """{column_key: 0-based column index} for every layout column in `headers`."""
+    letter_map = column_map_from_headers(headers, layout)
+    return {k: ord(v) - ord("A") for k, v in letter_map.items()}
 
 
 def get_csv_today_state(csv_path: Path, today: date) -> tuple[bool, list[str]]:
     """
-    Check the CSV for today's row.
-
-    Returns (row_exists, missing_game_names):
-      - row_exists is False if no row for today is present.
-      - missing_game_names lists games whose score cell is blank.
+    Returns (row_exists, missing_game_display_names).
+    Only games present in the CSV's header row are considered.
     """
+    layout = load_layout()
+    headers, rows = _read_rows(csv_path)
+    if not headers:
+        return False, []
+
+    key_to_idx = _key_to_index(headers, layout)
+    date_idx = key_to_idx.get("date")
+    if date_idx is None:
+        return False, []
+
     today_str = _today_str(today)
-    rows = _read_rows(csv_path)
+    name_by_key = {g["key"]: g["name"] for g in GAMES}
 
     for row in rows:
-        try:
-            row_date = row.get("Date", "").strip()
-            if row_date == today_str:
-                missing = []
-                for game in GAMES:
-                    col = game["name"].replace(" ", "")
-                    if not row.get(col, "").strip():
-                        missing.append(game["name"])
-                return True, missing
-        except Exception:
+        if len(row) <= date_idx or row[date_idx].strip() != today_str:
             continue
-
+        missing: list[str] = []
+        for game_key in layout.included_game_keys():
+            score_idx = key_to_idx.get(f"{game_key}.score")
+            if score_idx is None:
+                continue
+            if score_idx >= len(row) or not row[score_idx].strip():
+                missing.append(name_by_key[game_key])
+        return True, missing
     return False, []
 
 
 def write_csv(results: list[GameResult], today: date, csv_path: Path) -> None:
-    """
-    Write scores and averages to the CSV file.
-
-    - If today already has a row: update the score/avg cells in place.
-    - If today is new: append a fresh row.
-    """
+    """Write scores and averages to the CSV file, creating it if needed."""
+    layout = load_layout()
     today_str = _today_str(today)
-    rows = _read_rows(csv_path)
+    headers, rows = _read_rows(csv_path)
 
-    # Build the new row as a dict
-    new_row: dict[str, str] = {h: "" for h in HEADERS}
-    new_row["Date"]       = today_str
-    new_row["DayOfWeek"]  = today.strftime("%A")
+    if not headers:
+        # New file: use the layout's canonical headers.
+        headers = _layout_headers(layout)
+        rows = []
 
-    for result, (score_col, avg_col) in zip(results, SHEET_COLUMNS):
-        col_name = result.name.replace(" ", "")
-        if result.score is not None:
-            new_row[col_name] = result.score
-        if result.avg is not None:
-            new_row[f"{col_name}Avg"] = result.avg
+    key_to_idx = _key_to_index(headers, layout)
+    width = len(headers)
 
-    # Check whether today's row already exists
+    def _build_row(existing: Optional[list[str]] = None) -> list[str]:
+        row = list(existing) if existing else [""] * width
+        if len(row) < width:
+            row.extend([""] * (width - len(row)))
+
+        def _put(key: str, value):
+            idx = key_to_idx.get(key)
+            if idx is None or value is None or value == "":
+                return
+            row[idx] = str(value)
+
+        _put("date", today_str)
+        _put("day_of_week", today.strftime("%A"))
+        result_by_name = {r.name: r for r in results}
+        for game_key in layout.included_game_keys():
+            game_name = next((g["name"] for g in GAMES if g["key"] == game_key), None)
+            if not game_name:
+                continue
+            r = result_by_name.get(game_name)
+            if r is None:
+                continue
+            _put(f"{game_key}.score", r.score)
+            _put(f"{game_key}.avg", r.avg)
+            if r.number is not None:
+                _put(f"{game_key}.number", r.number)
+        return row
+
+    date_idx = key_to_idx.get("date")
     updated = False
-    for i, row in enumerate(rows):
-        if row.get("Date", "").strip() == today_str:
-            # Merge: only overwrite cells that have a new value
-            for key, val in new_row.items():
-                if val:
-                    rows[i][key] = val
-            updated = True
-            logger.info(f"Updated existing row for {today_str} in {csv_path.name}")
-            break
+    if date_idx is not None:
+        for i, existing in enumerate(rows):
+            if len(existing) > date_idx and existing[date_idx].strip() == today_str:
+                rows[i] = _build_row(existing)
+                updated = True
+                logger.info(f"Updated existing row for {today_str} in {csv_path.name}")
+                break
 
     if not updated:
-        rows.append(new_row)
+        rows.append(_build_row())
         logger.info(f"Appended new row for {today_str} to {csv_path.name}")
 
-    # Re-write the whole file (CSV files don't support in-place row edits)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=HEADERS)
-        writer.writeheader()
+        writer = csv.writer(f)
+        writer.writerow(headers)
         writer.writerows(rows)
 
     logger.info(f"CSV saved: {csv_path}")

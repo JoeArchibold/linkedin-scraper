@@ -37,6 +37,7 @@ The auth setup creates or uses these local values:
 | Location | Purpose |
 |----------|---------|
 | `scripts/.env` | Spreadsheet ID and worksheet tab name. Create this from `scripts/.env.example`. |
+| `scripts/sheet_layout.json` | Column layout, game inclusion/exclusion order, and whether to log puzzle numbers. Drives both `create_sheet.py` and the daily writer. |
 | `scripts/auth/google_credentials.json` | OAuth client configuration downloaded from Google Cloud Console. |
 | `<user data dir>/linkedin_state.enc` | Fernet-encrypted Playwright storage state for LinkedIn (cookies, localStorage). |
 | `<user data dir>/google_token.enc` | Fernet-encrypted cached Google user OAuth token. |
@@ -186,6 +187,130 @@ That encrypted token is reused on later runs. If it expires and has a refresh
 token, the script refreshes it automatically and saves the refreshed token back
 to the same encrypted file. If it cannot be refreshed, run
 `python setup_auth.py` again.
+
+## Creating a New Spreadsheet
+
+`scripts/create_sheet.py` provisions a fresh workbook (or adds a worksheet to
+an existing one) using `scripts/sheet_layout.json` as the source of truth for
+column order, game inclusion, and headers.
+
+### Step-by-Step
+
+1. **Confirm prerequisites.** `python setup_auth.py` must have been run at
+   least once so the Google OAuth flow has a cached user token. Verify
+   `scripts/auth/google_credentials.json` exists. If neither is in place,
+   complete the rest of this document first.
+
+2. **(Optional) Edit `scripts/sheet_layout.json`** to choose the spreadsheet
+   title, worksheet tab name, which games to include and in what order, and
+   whether to log puzzle numbers. See the schema reference below for valid
+   keys. Skip this step to use the defaults (mirrors the current sheet
+   structure).
+
+3. **Run the creation script:**
+
+   ```powershell
+   cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts
+   python create_sheet.py
+   ```
+
+   To add the layout as a new tab on an existing workbook instead of creating
+   a brand-new file:
+
+   ```powershell
+   python create_sheet.py --existing-id <spreadsheet-id> --worksheet "2027 Scores"
+   ```
+
+   To try a layout file other than the default:
+
+   ```powershell
+   python create_sheet.py --layout path\to\custom_layout.json
+   ```
+
+4. **Approve the additional Google consent prompt (first run only).** The
+   script needs the `drive.file` OAuth scope to create new spreadsheets,
+   which the daily-run setup didn't request. A browser window opens; sign in
+   with the same Google account you used during `setup_auth.py` and approve.
+   The encrypted token in the user data directory is then upgraded with the
+   new scope, and subsequent runs of `create_sheet.py` and `main.py` are
+   silent.
+
+5. **Copy the printed spreadsheet ID.** The script ends by printing
+   something like:
+
+   ```text
+   Spreadsheet URL : https://docs.google.com/spreadsheets/d/1AbCDeFGhIjK.../edit
+   Spreadsheet ID  : 1AbCDeFGhIjK...
+   Worksheet       : Sheet1
+   ```
+
+6. **Update `scripts/.env`** to point `main.py` at the new sheet:
+
+   ```text
+   SPREADSHEET_ID=1AbCDeFGhIjK...
+   WORKSHEET_NAME=Sheet1
+   ```
+
+   Use the worksheet name printed by the script. Skip this step if you used
+   `--existing-id` against the spreadsheet that `.env` already points at and
+   you simply want to keep writing to a different tab — in that case update
+   only `WORKSHEET_NAME`.
+
+7. **Share the spreadsheet (optional).** A workbook created through
+   `drive.file` is only accessible to the signing-in Google account.
+   Open the printed URL in a browser and use Sheets's Share dialog to grant
+   access to other accounts. The script never modifies sharing permissions.
+
+8. **Verify with a dry run:**
+
+   ```powershell
+   python main.py --dry-run --summary-only
+   ```
+
+   This authenticates against the new spreadsheet, reads its headers (no row
+   exists for today yet), and prints the result table without writing.
+
+9. **Populate it:**
+
+   ```powershell
+   python main.py --summary-only
+   ```
+
+   The daily writer reads row 1 of the new sheet, matches the headers against
+   the layout, and writes today's row. From here on, the new spreadsheet is
+   the live target.
+
+> [!NOTE]
+> `create_sheet.py` creates an **empty** workbook with headers and formatting
+> only. Historical rows are not migrated from the previous sheet. If you want
+> the data carried over, copy/paste the prior rows into the new sheet
+> manually after step 5 — column positions match by header, so paste order
+> doesn't matter as long as the source columns line up.
+
+### `sheet_layout.json` schema
+
+```jsonc
+{
+  "title": "LinkedIn Games Tracking",    // used only when creating a new workbook
+  "worksheet_name": "Sheet1",            // tab name inside the workbook
+  "include_puzzle_numbers": false,       // true => add a "<Game> #" column per game
+  "index_prefix": ["date"],              // appears before the game columns
+  "games": [                             // order = column order; omit a game to exclude it
+    "zip", "tango", "queens", "patches",
+    "mini_sudoku", "crossclimb", "pinpoint"
+  ],
+  "index_suffix": ["day_of_week"]        // appears after the game columns
+}
+```
+
+Valid game keys: `zip`, `tango`, `queens`, `patches`, `mini_sudoku`,
+`crossclimb`, `pinpoint`.
+Valid index keys: `date`, `day_of_week`. Both `index_prefix` and
+`index_suffix` accept any subset (or empty `[]`) in any order.
+
+The daily writer (`sheets_updater.py`) reads the live row-1 headers and
+matches them against the layout, so once `.env` points at the new sheet, any
+layout change is picked up automatically — no further config edits needed.
 
 ## First Run Check
 

@@ -1,21 +1,14 @@
 """
 Google Sheets updater for LinkedIn Games scores.
 
-Uses OAuth2 (gspread + google-auth-oauthlib). On first run it opens a
-browser for the one-time consent flow and caches a token in the OS credential
-store.
+Uses OAuth2 (gspread + google-auth-oauthlib). On first run it opens a browser
+for the one-time consent flow and caches a token in the OS credential store.
 Subsequent runs are fully headless.
 
-Spreadsheet layout:
-  A  = Date
-  B  = Zip time         C  = Zip avg
-  D  = Tango time       E  = Tango avg
-  F  = Queens time      G  = Queens avg
-  H  = Patches time     I  = Patches avg
-  J  = Mini Sudoku time K  = Mini Sudoku avg
-  L  = CrossClimb time  M  = CrossClimb avg
-  N  = Pinpoint guesses O  = Pinpoint avg
-  P  = Day of week
+Column layout is driven by sheet_layout.json (parsed via sheet_layout.py).
+Row 1 of the worksheet is the source of truth: this module reads the headers
+and matches them against the layout, so reordering or excluding columns in
+the sheet flows through automatically.
 """
 
 import logging
@@ -29,10 +22,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 from config import (
+    GAMES,
     SPREADSHEET_ID,
     WORKSHEET_NAME,
-    GAMES,
-    SHEET_COLUMNS,
     GOOGLE_CREDENTIALS_FILE,
     GOOGLE_TOKEN_FILE,
 )
@@ -42,16 +34,22 @@ from auth_store import (
     import_json_file_if_missing,
     save_google_token_json,
 )
+from sheet_layout import Layout, column_map_from_headers, load_layout
 from linkedin_scraper import GameResult
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# `drive.file` is a non-sensitive scope: it only grants access to files this
+# app creates, which is what create_sheet.py needs when calling gc.create().
+# Existing tokens scoped to `spreadsheets` alone will trigger a re-consent on
+# next run; daily runs that only read/write existing sheets are unaffected.
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file",
+]
 
-# Column letter → 0-based index (A=0, B=1, …)
-def _col_idx(letter: str) -> int:
-    return ord(letter.upper()) - ord("A")
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 def _get_credentials() -> Credentials:
     """Return valid OAuth2 credentials, refreshing or re-authorising as needed."""
@@ -59,7 +57,7 @@ def _get_credentials() -> Credentials:
 
     imported = import_json_file_if_missing(GOOGLE_TOKEN_KEY, GOOGLE_TOKEN_FILE)
     if imported:
-        logger.info("Imported legacy Google token file into the OS credential store.")
+        logger.info("Imported legacy Google token file into the encrypted store.")
 
     token_json = get_google_token_json()
     if token_json:
@@ -82,38 +80,13 @@ def _get_credentials() -> Credentials:
             )
             creds = flow.run_local_server(port=0)
 
-        # Cache for next run
         save_google_token_json(creds.to_json())
-        logger.info("Google token saved to the OS credential store.")
+        logger.info("Google token saved to the encrypted store.")
 
     return creds
 
 
-def get_today_state(today: date) -> tuple[Optional[int], list[str]]:
-    """
-    Check the spreadsheet for today's row.
-
-    Returns (row_num, missing_game_names):
-      - row_num is None if no row exists for today.
-      - missing_game_names is a list of game names whose score cell is blank.
-        An empty list means all scores are already present.
-    """
-    today_str = f"{today.month}/{today.day}/{today.year}"
-    ws = _open_worksheet()
-    row_num = _find_today_row(ws, today_str, today)
-
-    if row_num is None:
-        return None, []
-
-    row_values = ws.row_values(row_num)
-    missing = []
-    for game, (score_col, _) in zip(GAMES, SHEET_COLUMNS):
-        idx = _col_idx(score_col)
-        if idx >= len(row_values) or not row_values[idx].strip():
-            missing.append(game["name"])
-
-    return row_num, missing
-
+# ── Worksheet helpers ─────────────────────────────────────────────────────────
 
 def _open_worksheet() -> gspread.Worksheet:
     creds = _get_credentials()
@@ -122,83 +95,179 @@ def _open_worksheet() -> gspread.Worksheet:
     return sh.worksheet(WORKSHEET_NAME)
 
 
-def _find_today_row(ws: gspread.Worksheet, today_str: str, today: date) -> Optional[int]:
-    """
-    Return the 1-based row index if today's date already exists in column A,
-    else None. Checks both 'M/D/YYYY' and 'MM/DD/YYYY' formats.
-    """
-    col_a = ws.col_values(1)  # 1-based column index
-    for i, cell in enumerate(col_a, start=1):
+def _column_map(ws: gspread.Worksheet, layout: Layout) -> dict[str, str]:
+    """{column_key: A1_letter} for every layout column found in row 1."""
+    headers = ws.row_values(1)
+    mapping = column_map_from_headers(headers, layout)
+    if not mapping:
+        raise RuntimeError(
+            f"No layout columns matched the headers in worksheet "
+            f"'{ws.title}'. Either the sheet is empty or the headers don't "
+            "match sheet_layout.json. Run create_sheet.py to bootstrap a new "
+            "sheet, or update sheet_layout.json to match the existing one."
+        )
+    return mapping
+
+
+def _find_today_row(ws: gspread.Worksheet, today: date, date_letter: str) -> Optional[int]:
+    """Return 1-based row index of today's row in the date column, else None."""
+    col_idx = ord(date_letter.upper()) - ord("A") + 1  # gspread is 1-based
+    for i, cell in enumerate(ws.col_values(col_idx), start=1):
+        if i == 1:
+            continue  # skip header
         try:
-            cell_date = datetime.strptime(cell.strip(), "%m/%d/%Y").date()
-            if cell_date == today:
+            if datetime.strptime(cell.strip(), "%m/%d/%Y").date() == today:
                 return i
         except ValueError:
             continue
     return None
 
 
-def update_sheet(results: list[GameResult], today: date) -> None:
-    """
-    Write scores and averages to the spreadsheet.
+# ── Public API ────────────────────────────────────────────────────────────────
 
-    - If today already has a row: update only the average columns (in case
-      averages have shifted since the scores were recorded).
-    - If today is a new day: append a fresh row with all values.
+def get_today_state(today: date) -> tuple[Optional[int], list[str]]:
     """
-    if len(results) != len(SHEET_COLUMNS):
-        raise ValueError(
-            f"Expected {len(SHEET_COLUMNS)} game results, got {len(results)}"
+    Check the spreadsheet for today's row.
+
+    Returns (row_num, missing_game_names):
+      - row_num is None if no row exists for today.
+      - missing_game_names is the display names of games whose score cell in
+        today's row is blank. Only games that have a column in the sheet are
+        considered; excluded games never appear.
+    """
+    layout = load_layout()
+    ws = _open_worksheet()
+    col_map = _column_map(ws, layout)
+
+    date_letter = col_map.get("date")
+    if not date_letter:
+        raise RuntimeError(
+            f"Worksheet '{ws.title}' has no 'Date' column matching the layout."
         )
 
-    # No-leading-zero date string (M/D/YYYY) compatible with Windows and Linux
+    row_num = _find_today_row(ws, today, date_letter)
+    if row_num is None:
+        return None, []
+
+    row_values = ws.row_values(row_num)
+    name_by_key = {g["key"]: g["name"] for g in GAMES}
+
+    missing: list[str] = []
+    for game_key in layout.included_game_keys():
+        score_letter = col_map.get(f"{game_key}.score")
+        if not score_letter:
+            continue
+        idx = ord(score_letter.upper()) - ord("A")
+        if idx >= len(row_values) or not row_values[idx].strip():
+            missing.append(name_by_key[game_key])
+    return row_num, missing
+
+
+def update_sheet(results: list[GameResult], today: date) -> None:
+    """Write scores and averages to the spreadsheet for `today`."""
+    layout = load_layout()
+    ws = _open_worksheet()
+    col_map = _column_map(ws, layout)
+
+    date_letter = col_map.get("date")
+    if not date_letter:
+        raise RuntimeError("Layout has no 'Date' index column — cannot place row.")
+
+    row_num = _find_today_row(ws, today, date_letter)
     today_str = f"{today.month}/{today.day}/{today.year}"
 
-    ws = _open_worksheet()
-    existing_row = _find_today_row(ws, today_str, today)
-
-    if existing_row:
-        logger.info(f"Row {existing_row} already exists for {today_str} — updating scores and averages")
-        _update_row(ws, existing_row, today, results)
+    if row_num:
+        logger.info(f"Row {row_num} already exists for {today_str} — updating cells")
+        _update_existing_row(ws, col_map, row_num, today, today_str, results, layout)
     else:
         logger.info(f"Appending new row for {today_str}")
-        _append_row(ws, today_str, today, results)
+        _append_new_row(ws, col_map, today, today_str, results, layout)
 
 
-def _build_row_values(today_str: str, today: date, results: list[GameResult]) -> list:
-    """Build a 16-element list: [date, B, C, D, E, …, N, O, day_of_week]."""
-    # Pre-fill with empty strings (16 columns: A through P)
-    row = [""] * 16
-    row[0]  = today_str                   # Column A: date
-    row[15] = today.strftime("%A")        # Column P: day of week
+def _build_updates_for_results(
+    col_map: dict[str, str],
+    results: list[GameResult],
+    layout: Layout,
+    row_num: int,
+) -> list[dict]:
+    """A1 batch_update payload entries for one row's game cells."""
+    updates: list[dict] = []
+    result_by_name = {r.name: r for r in results}
 
-    for result, (score_col, avg_col) in zip(results, SHEET_COLUMNS):
-        score_idx = _col_idx(score_col)
-        avg_idx   = _col_idx(avg_col)
-        row[score_idx] = result.score or ""
-        row[avg_idx]   = result.avg   or ""
+    for game_key in layout.included_game_keys():
+        game_name = next((g["name"] for g in GAMES if g["key"] == game_key), None)
+        if not game_name:
+            continue
+        r = result_by_name.get(game_name)
+        if r is None:
+            continue
 
-    return row
+        if r.score is not None and (letter := col_map.get(f"{game_key}.score")):
+            updates.append({"range": f"{letter}{row_num}", "values": [[r.score]]})
+        if r.avg is not None and (letter := col_map.get(f"{game_key}.avg")):
+            updates.append({"range": f"{letter}{row_num}", "values": [[r.avg]]})
+        if r.number is not None and (letter := col_map.get(f"{game_key}.number")):
+            updates.append({"range": f"{letter}{row_num}", "values": [[r.number]]})
+    return updates
 
 
-def _append_row(ws: gspread.Worksheet, today_str: str, today: date, results: list[GameResult]) -> None:
-    row = _build_row_values(today_str, today, results)
-    ws.append_row(row, value_input_option="USER_ENTERED")
-    logger.info("Row appended successfully.")
+def _update_existing_row(
+    ws: gspread.Worksheet,
+    col_map: dict[str, str],
+    row_num: int,
+    today: date,
+    today_str: str,
+    results: list[GameResult],
+    layout: Layout,
+) -> None:
+    updates = _build_updates_for_results(col_map, results, layout, row_num)
 
-
-def _update_row(ws: gspread.Worksheet, row_num: int, today: date, results: list[GameResult]) -> None:
-    """Overwrite score, average, and day-of-week cells in an existing row for today."""
-    updates = []
-    for result, (score_col, avg_col) in zip(results, SHEET_COLUMNS):
-        if result.score is not None:
-            updates.append({"range": f"{score_col}{row_num}", "values": [[result.score]]})
-        if result.avg is not None:
-            updates.append({"range": f"{avg_col}{row_num}", "values": [[result.avg]]})
-    updates.append({"range": f"P{row_num}", "values": [[today.strftime("%A")]]})
+    if (letter := col_map.get("day_of_week")):
+        updates.append({"range": f"{letter}{row_num}", "values": [[today.strftime("%A")]]})
 
     if updates:
         ws.batch_update(updates, value_input_option="USER_ENTERED")
         logger.info(f"Updated {len(updates)} cell(s) in row {row_num}.")
     else:
         logger.info("No values to update.")
+
+
+def _append_new_row(
+    ws: gspread.Worksheet,
+    col_map: dict[str, str],
+    today: date,
+    today_str: str,
+    results: list[GameResult],
+    layout: Layout,
+) -> None:
+    # Build a full-width row covering every layout column, populating cells we
+    # have data for and leaving others blank.
+    width = len(layout.columns)
+    row: list[str] = [""] * width
+
+    def _put(key: str, value):
+        letter = col_map.get(key)
+        if not letter or value is None:
+            return
+        idx = ord(letter.upper()) - ord("A")
+        if idx < width:
+            row[idx] = value
+
+    _put("date", today_str)
+    _put("day_of_week", today.strftime("%A"))
+
+    result_by_name = {r.name: r for r in results}
+    for game_key in layout.included_game_keys():
+        game_name = next((g["name"] for g in GAMES if g["key"] == game_key), None)
+        if not game_name:
+            continue
+        r = result_by_name.get(game_name)
+        if r is None:
+            continue
+        _put(f"{game_key}.score", r.score or "")
+        _put(f"{game_key}.avg", r.avg or "")
+        if r.number is not None:
+            _put(f"{game_key}.number", r.number)
+
+    ws.append_row(row, value_input_option="USER_ENTERED")
+    logger.info("Row appended successfully.")
