@@ -44,8 +44,7 @@ def _read_rows(csv_path: Path) -> tuple[list[str], list[list[str]]]:
 
 def _key_to_index(headers: list[str], layout: Layout) -> dict[str, int]:
     """{column_key: 0-based column index} for every layout column in `headers`."""
-    letter_map = column_map_from_headers(headers, layout)
-    return {k: ord(v) - ord("A") for k, v in letter_map.items()}
+    return column_map_from_headers(headers, layout)
 
 
 def get_csv_today_state(csv_path: Path, today: date) -> tuple[bool, list[str]]:

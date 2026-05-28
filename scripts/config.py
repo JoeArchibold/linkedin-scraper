@@ -1,8 +1,9 @@
 """
-Configuration for LinkedIn Games score tracker.
-Sensitive values (spreadsheet ID, worksheet name) are loaded from a .env
-file in the same directory as this script. Copy .env.example to .env and
-fill in your values before running for the first time.
+Configuration for the LinkedIn Games score collector (CSV-only build).
+
+`.env` lives next to this file. Copy `.env.example` to `.env` to customise.
+Nothing in `.env` is required — the script runs with sensible defaults if
+the file is absent.
 """
 
 import os
@@ -20,22 +21,35 @@ AUTH_DIR.mkdir(exist_ok=True)
 # encrypted store on first run and can then be deleted.
 LINKEDIN_STATE_FILE = AUTH_DIR / "linkedin_state.json"
 
-# Google OAuth2 credentials downloaded from Google Cloud Console
-GOOGLE_CREDENTIALS_FILE = AUTH_DIR / "google_credentials.json"
+# Path to the JSON layout file that controls which games appear in the output.
+# See sheet_layout.py.
+SHEET_LAYOUT_FILE = SCRIPTS_DIR / "sheet_layout.json"
 
-# Legacy Google OAuth2 token file. If present, it is migrated into the
-# encrypted store on first run and can then be deleted.
-GOOGLE_TOKEN_FILE = AUTH_DIR / "google_token.json"
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Sheet1")
+# ── Output ─────────────────────────────────────────────────────────────────────
 
-if not SPREADSHEET_ID:
-    raise EnvironmentError(
-        "SPREADSHEET_ID is not set. "
-        "Copy .env.example to .env and add your spreadsheet ID."
-    )
+def _resolve_output_path() -> Path:
+    """
+    Where to write results.csv by default.
+
+    Resolution order (first match wins):
+      1. $RESULTS_CSV from .env or the environment — absolute or relative.
+         Relative paths resolve against the current working directory.
+      2. ./results.csv in the current working directory.
+
+    The CLI `--output FILE` flag overrides this at runtime.
+    """
+    env_value = os.getenv("RESULTS_CSV")
+    if env_value:
+        path = Path(env_value).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path
+    return Path.cwd() / "results.csv"
+
+
+DEFAULT_RESULTS_CSV = _resolve_output_path()
+
 
 # ── LinkedIn Games ─────────────────────────────────────────────────────────────
 # `key` is the stable identifier used by sheet_layout.json. `name` is the
@@ -85,7 +99,3 @@ GAMES = [
         "is_time": False,  # Returns guesses (integer), not a time
     },
 ]
-
-# Path to the JSON layout file that controls which games appear in the output,
-# in what order, and whether puzzle numbers are written. See sheet_layout.py.
-SHEET_LAYOUT_FILE = SCRIPTS_DIR / "sheet_layout.json"

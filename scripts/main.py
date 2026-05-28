@@ -1,15 +1,14 @@
 """
-LinkedIn Games daily score tracker.
+LinkedIn Games daily score collector (CSV-only build).
 
 Usage:
     python main.py              # smart mode: skip games already recorded today
     python main.py --update     # fetch all games and refresh scores + averages
-    python main.py --dry-run    # print what would be written without touching the sheet
+    python main.py --dry-run    # print what would be written without touching the CSV
     python main.py --debug      # save a screenshot + HTML dump for every page visited
     python main.py --summary-only  # print only the results table plus errors
     python main.py --timezone America/Chicago  # override auto-detected local timezone
-    python main.py --csv                       # write to results.csv instead of Google Sheets
-    python main.py --csv path/to/scores.csv    # write to a specific CSV file
+    python main.py --output path/to/scores.csv # write to a specific CSV file
 """
 
 import argparse
@@ -26,11 +25,8 @@ except ImportError:
     _TZLOCAL_AVAILABLE = False
 
 from linkedin_scraper import fetch_all_scores, GameResult
-from sheets_updater import get_today_state, update_sheet
 from csv_writer import get_csv_today_state, write_csv
-from config import SCRIPTS_DIR
-
-_DEFAULT_CSV = SCRIPTS_DIR / "results.csv"
+from config import DEFAULT_RESULTS_CSV, SCRIPTS_DIR
 
 # LinkedIn games reset at midnight Pacific time
 _LINKEDIN_TZ = ZoneInfo("America/Los_Angeles")
@@ -129,9 +125,9 @@ def print_results(results: list[GameResult], show_status: bool = False) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and log to Google Sheets")
+    parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and append them to a local CSV file")
     parser.add_argument("--update",      action="store_true", help="Fetch all games and update scores + averages regardless of existing data")
-    parser.add_argument("--dry-run",     action="store_true", help="Print scores without writing to the sheet")
+    parser.add_argument("--dry-run",     action="store_true", help="Print scores without writing to the CSV")
     parser.add_argument("--debug",       action="store_true", help="Save a screenshot + HTML dump for every page visited")
     parser.add_argument("--show-status", action="store_true", help="Include a Status column in the results table")
     parser.add_argument("--summary-only", action="store_true",
@@ -139,9 +135,9 @@ def main() -> int:
     parser.add_argument("--timezone",    metavar="TZ", default=None,
                         help="Your local IANA timezone name (e.g. America/New_York). "
                              "Auto-detected if omitted.")
-    parser.add_argument("--csv",         nargs="?", const=str(_DEFAULT_CSV), metavar="FILE",
-                        help="Write results to a local CSV file instead of Google Sheets. "
-                             f"Defaults to {_DEFAULT_CSV.name} in the script folder if no path is given.")
+    parser.add_argument("--output",      metavar="FILE", default=None,
+                        help="Path to the results CSV. Overrides $RESULTS_CSV and the default "
+                             f"(currently {DEFAULT_RESULTS_CSV}).")
     args = parser.parse_args()
 
     if args.summary_only:
@@ -160,27 +156,15 @@ def main() -> int:
         if not args.summary_only:
             logging.getLogger().setLevel(logging.DEBUG)
 
-    # ── Check existing data (sheet or CSV) ────────────────────────────────────
-    csv_path = Path(args.csv) if args.csv else None
-
-    if csv_path:
-        logger.info(f"CSV mode — checking {csv_path} for today's data …")
-        try:
-            row_exists, missing_games = get_csv_today_state(csv_path, linkedin_date)
-        except Exception as exc:
-            logger.error(f"Could not read CSV: {exc}")
-            return 1
-        row_num = True if row_exists else None   # reuse same None-means-new-row logic below
-    else:
-        logger.info("Checking spreadsheet for today's data …")
-        try:
-            row_num, missing_games = get_today_state(linkedin_date)
-        except FileNotFoundError as exc:
-            logger.error(str(exc))
-            return 1
-        except Exception as exc:
-            logger.error(f"Could not read spreadsheet: {exc}")
-            return 1
+    # ── Check existing data ───────────────────────────────────────────────────
+    csv_path = Path(args.output).expanduser() if args.output else DEFAULT_RESULTS_CSV
+    logger.info(f"Output file: {csv_path}")
+    try:
+        row_exists, missing_games = get_csv_today_state(csv_path, linkedin_date)
+    except Exception as exc:
+        logger.error(f"Could not read CSV: {exc}")
+        return 1
+    row_num = True if row_exists else None   # reuse same None-means-new-row logic below
 
     # ── Determine which games to fetch ────────────────────────────────────────
     if args.update:
@@ -227,23 +211,12 @@ def main() -> int:
         return 0
 
     # ── Write results ──────────────────────────────────────────────────────────
-    if csv_path:
-        logger.info(f"Writing to CSV: {csv_path} …")
-        try:
-            write_csv(results, linkedin_date, csv_path)
-        except Exception as exc:
-            logger.error(f"CSV write failed: {exc}")
-            return 1
-    else:
-        logger.info("Updating Google Sheets …")
-        try:
-            update_sheet(results, linkedin_date)
-        except FileNotFoundError as exc:
-            logger.error(str(exc))
-            return 1
-        except Exception as exc:
-            logger.error(f"Sheets update failed: {exc}")
-            return 1
+    logger.info(f"Writing to CSV: {csv_path} …")
+    try:
+        write_csv(results, linkedin_date, csv_path)
+    except Exception as exc:
+        logger.error(f"CSV write failed: {exc}")
+        return 1
 
     logger.info("Done.")
     return 0
