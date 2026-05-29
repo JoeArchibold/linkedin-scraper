@@ -26,6 +26,7 @@ except ImportError:
 
 from linkedin_scraper import fetch_all_scores, GameResult
 from csv_writer import get_csv_today_state, write_csv
+from sheet_layout import load_layout
 from config import DEFAULT_RESULTS_CSV, SCRIPTS_DIR
 
 # LinkedIn games reset at midnight Pacific time
@@ -183,7 +184,17 @@ def main() -> int:
 
     # ── Fetch ──────────────────────────────────────────────────────────────────
     try:
-        results = fetch_all_scores(names=names_to_fetch, debug_dir=debug_dir)
+        anchor_name = load_layout().anchor_game_name()
+    except Exception as exc:
+        logger.warning(f"Could not read anchor_game from layout ({exc}); using default.")
+        anchor_name = None
+
+    try:
+        results = fetch_all_scores(
+            names=names_to_fetch,
+            debug_dir=debug_dir,
+            anchor_name=anchor_name,
+        )
     except FileNotFoundError as exc:
         logger.error(str(exc))
         return 1

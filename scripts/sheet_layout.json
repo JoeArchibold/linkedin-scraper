@@ -1,11 +1,12 @@
 {
   "include_day_of_week": true,
-  "include_puzzle_numbers": false,
+  "include_puzzle_numbers": true,
+  "anchor_game": "zip",
   "games": [
+    "patches",
     "zip",
     "tango",
     "queens",
-    "patches",
     "mini_sudoku",
     "crossclimb",
     "pinpoint"

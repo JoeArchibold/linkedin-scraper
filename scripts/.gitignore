@@ -26,3 +26,7 @@ env/
 .env
 .env.*
 !.env.example
+
+# Miscellaneous files
+CHECKLIST.md
+results.csv

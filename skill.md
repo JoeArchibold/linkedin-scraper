@@ -6,7 +6,7 @@ description: A skill to collect daily LinkedIn Games scores and write them to a 
 Run the following command to fetch today's LinkedIn Games scores and append them to the configured CSV file with concise output:
 
 ```
-cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts && python main.py --summary-only
+cd ~/.claude/skills/Linkedin-games/scripts && python main.py --summary-only
 ```
 
 The script uses the LinkedIn/Pacific date because LinkedIn Games reset at midnight Pacific time.
@@ -15,7 +15,7 @@ Default behavior:
 1. Check the configured CSV for an existing row for today's LinkedIn/Pacific date.
 2. If no row exists, fetch all configured games and append a new row.
 3. If a row exists with missing scores, fetch only the missing games and update the row.
-4. If a row exists with all scores present, exit with no action.
+4. If a row exists with all scores present, check the daily averages for each game and update if necessary (the `--update` parameter on the script can be used for this).
 5. Print the results table. With `--summary-only`, suppress informational logs and keep only the table plus errors.
 
 ## Parameters
@@ -40,13 +40,13 @@ For skill usage, prefer `--summary-only` so the output stays compact for model c
 If the script reports errors or missing scores, re-run with `--debug` to inspect what Playwright is retrieving:
 
 ```
-cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts && python main.py --debug
+cd ~/.claude/skills/Linkedin-games/scripts && python main.py --debug
 ```
 
 If the LinkedIn session has expired, re-run the auth setup:
 
 ```
-cd C:\Users\Brian\.claude\skills\Linkedin-games\scripts && python setup_auth.py
+cd ~/.claude/skills/Linkedin-games/scripts && python setup_auth.py
 ```
 
-The LinkedIn session state is encrypted with Fernet and stored in the user's per-OS data directory (`%LOCALAPPDATA%\linkedin-games\` on Windows). The Fernet master key lives in the OS credential store via `keyring`. Which games to collect, in what order, and whether to log puzzle numbers and the day of week is controlled by `scripts/sheet_layout.json`. The output CSV location is `./results.csv` by default; override with `RESULTS_CSV` in `scripts/.env` or `--output`. See `SETUP.md` for details.
+The LinkedIn session state is encrypted with Fernet and stored in the user's per-OS data directory (`%LOCALAPPDATA%\linkedin-games\` on Windows). The Fernet master key lives in the OS credential store via `keyring`. Which games to collect, in what order, whether to log puzzle numbers and the day of week, and which game to use as the anchor for played/unplayed detection is controlled by `scripts/sheet_layout.json`. The output CSV location is `./results.csv` by default; override with `RESULTS_CSV` in `scripts/.env` or `--output`. See `SETUP.md` for details.

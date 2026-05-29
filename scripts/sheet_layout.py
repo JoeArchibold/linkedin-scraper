@@ -39,7 +39,20 @@ class Layout:
     include_puzzle_numbers: bool
     include_day_of_week: bool
     columns: list[ColumnSpec]
+    anchor_game: Optional[str] = None  # game key whose results page is the
+                                       # preferred fallback when nothing is
+                                       # recorded yet today; None = scraper
+                                       # picks the first to-fetch game
     raw: dict = field(default_factory=dict)
+
+    def anchor_game_name(self) -> Optional[str]:
+        """Resolve anchor_game (a key) to its display name, or None if unset."""
+        if not self.anchor_game:
+            return None
+        for g in GAMES:
+            if g["key"] == self.anchor_game:
+                return g["name"]
+        return None
 
     def included_game_keys(self) -> list[str]:
         """Game keys present in the layout, in column order."""
@@ -115,16 +128,35 @@ def load_layout(path: Path | None = None) -> Layout:
     if include_dow:
         columns.append(ColumnSpec(key="day_of_week", header="Day of Week", kind="text"))
 
-    for game_key in data.get("games", []):
+    included_keys = list(data.get("games", []))
+    for game_key in included_keys:
         columns.extend(_game_columns(_game_by_key(game_key), include_numbers))
 
     if len(columns) <= (2 if include_dow else 1):
         raise ValueError(f"Layout {path} has no game columns")
 
+    anchor = data.get("anchor_game")
+    if anchor is not None:
+        if not isinstance(anchor, str):
+            raise ValueError(
+                f"anchor_game must be a string game key, got {type(anchor).__name__}"
+            )
+        # Validate against known keys (uses GAMES, not just included games,
+        # so a typo gets caught even if the user has temporarily excluded the
+        # anchor). Enforce inclusion here too: anchoring on an excluded game
+        # is almost certainly a mistake.
+        _game_by_key(anchor)  # raises with a helpful message on typos
+        if anchor not in included_keys:
+            raise ValueError(
+                f"anchor_game {anchor!r} is not present in the 'games' list. "
+                "Either add it to 'games' or pick a game that is included."
+            )
+
     return Layout(
         include_puzzle_numbers=include_numbers,
         include_day_of_week=include_dow,
         columns=columns,
+        anchor_game=anchor,
         raw=data,
     )
 
