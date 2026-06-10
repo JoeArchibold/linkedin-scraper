@@ -26,8 +26,9 @@ except ImportError:
 
 from linkedin_scraper import fetch_all_scores, GameResult
 from csv_writer import get_csv_today_state, write_csv
+from json_writer import get_json_today_state, write_json
 from sheet_layout import load_layout
-from config import DEFAULT_RESULTS_CSV, SCRIPTS_DIR
+from config import DEFAULT_OUTPUT_PATH, SCRIPTS_DIR
 
 # LinkedIn games reset at midnight Pacific time
 _LINKEDIN_TZ = ZoneInfo("America/Los_Angeles")
@@ -137,8 +138,9 @@ def main() -> int:
                         help="Your local IANA timezone name (e.g. America/New_York). "
                              "Auto-detected if omitted.")
     parser.add_argument("--output",      metavar="FILE", default=None,
-                        help="Path to the results CSV. Overrides $RESULTS_CSV and the default "
-                             f"(currently {DEFAULT_RESULTS_CSV}).")
+                        help="Path to the results file. Overrides $RESULTS_JSON/$RESULTS_CSV and "
+                             f"the default (currently {DEFAULT_OUTPUT_PATH}). A '.json' extension "
+                             "writes the JSON store; any other extension writes CSV.")
     args = parser.parse_args()
 
     if args.summary_only:
@@ -158,12 +160,17 @@ def main() -> int:
             logging.getLogger().setLevel(logging.DEBUG)
 
     # ── Check existing data ───────────────────────────────────────────────────
-    csv_path = Path(args.output).expanduser() if args.output else DEFAULT_RESULTS_CSV
-    logger.info(f"Output file: {csv_path}")
+    output_path = Path(args.output).expanduser() if args.output else DEFAULT_OUTPUT_PATH
+    is_json = output_path.suffix.lower() == ".json"
+    fmt = "JSON" if is_json else "CSV"
+    logger.info(f"Output file: {output_path} ({fmt})")
     try:
-        row_exists, missing_games = get_csv_today_state(csv_path, linkedin_date)
+        if is_json:
+            row_exists, missing_games = get_json_today_state(output_path, linkedin_date)
+        else:
+            row_exists, missing_games = get_csv_today_state(output_path, linkedin_date)
     except Exception as exc:
-        logger.error(f"Could not read CSV: {exc}")
+        logger.error(f"Could not read {fmt} file: {exc}")
         return 1
     row_num = True if row_exists else None   # reuse same None-means-new-row logic below
 
@@ -222,11 +229,14 @@ def main() -> int:
         return 0
 
     # ── Write results ──────────────────────────────────────────────────────────
-    logger.info(f"Writing to CSV: {csv_path} …")
+    logger.info(f"Writing to {fmt}: {output_path} …")
     try:
-        write_csv(results, linkedin_date, csv_path)
+        if is_json:
+            write_json(results, linkedin_date, output_path)
+        else:
+            write_csv(results, linkedin_date, output_path)
     except Exception as exc:
-        logger.error(f"CSV write failed: {exc}")
+        logger.error(f"{fmt} write failed: {exc}")
         return 1
 
     logger.info("Done.")

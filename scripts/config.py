@@ -28,27 +28,31 @@ SHEET_LAYOUT_FILE = SCRIPTS_DIR / "sheet_layout.json"
 
 # ── Output ─────────────────────────────────────────────────────────────────────
 
-def _resolve_output_path() -> Path:
+def _resolve_env_path(var: str) -> Path | None:
     """
-    Where to write results.csv by default.
+    Resolve an output-path environment variable (from .env or the environment).
 
-    Resolution order (first match wins):
-      1. $RESULTS_CSV from .env or the environment — absolute or relative.
-         Relative paths resolve against the current working directory.
-      2. ./results.csv in the current working directory.
-
-    The CLI `--output FILE` flag overrides this at runtime.
+    Returns the path if the variable is set, else None. Relative paths resolve
+    against the current working directory.
     """
-    env_value = os.getenv("RESULTS_CSV")
-    if env_value:
-        path = Path(env_value).expanduser()
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        return path
-    return Path.cwd() / "results.csv"
+    env_value = os.getenv(var)
+    if not env_value:
+        return None
+    path = Path(env_value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
 
 
-DEFAULT_RESULTS_CSV = _resolve_output_path()
+# Configured output locations (None when the corresponding env var is unset).
+DEFAULT_RESULTS_JSON = _resolve_env_path("RESULTS_JSON")
+DEFAULT_RESULTS_CSV = _resolve_env_path("RESULTS_CSV") or (Path.cwd() / "results.csv")
+
+# Default output used when `--output FILE` is not supplied. JSON is the primary
+# store, so a configured $RESULTS_JSON takes precedence; otherwise fall back to
+# the CSV location. The CLI flag overrides this, and the writer is chosen by the
+# output file's extension (.json -> JSON, anything else -> CSV).
+DEFAULT_OUTPUT_PATH = DEFAULT_RESULTS_JSON or DEFAULT_RESULTS_CSV
 
 
 # ── LinkedIn Games ─────────────────────────────────────────────────────────────

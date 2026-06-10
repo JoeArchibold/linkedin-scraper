@@ -30,3 +30,6 @@ env/
 # Miscellaneous files
 CHECKLIST.md
 results.csv
+results_import.json
+results_export.csv
+
