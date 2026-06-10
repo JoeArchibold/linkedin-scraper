@@ -79,6 +79,12 @@ GAMES = [
         "is_time": True,
     },
     {
+        "key":     "wend",
+        "name":    "Wend",
+        "url":     "https://www.linkedin.com/games/wend/results/",
+        "is_time": True,
+    },
+    {
         "key":     "pinpoint",
         "name":    "Pinpoint",
         "url":     "https://www.linkedin.com/games/pinpoint/results/",

@@ -10,6 +10,7 @@
     "patches",
     "mini_sudoku",
     "crossclimb",
+    "wend",
     "pinpoint"
   ],
   "index_suffix": ["day_of_week"]
