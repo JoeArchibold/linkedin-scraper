@@ -41,17 +41,14 @@ DATA_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 LINKEDIN_STATE_PATH = DATA_DIR / "linkedin_state.enc"
-GOOGLE_TOKEN_PATH = DATA_DIR / "google_token.enc"
 SALT_PATH = DATA_DIR / "passphrase.salt"
 
-# Logical identifiers kept for backwards-compatibility with callers that still
-# pass them to import_json_file_if_missing().
+# Logical identifier kept for backwards-compatibility with callers that still
+# pass it to import_json_file_if_missing().
 LINKEDIN_STATE_KEY = "linkedin_state"
-GOOGLE_TOKEN_KEY = "google_token"
 
 _TARGETS = {
     LINKEDIN_STATE_KEY: LINKEDIN_STATE_PATH,
-    GOOGLE_TOKEN_KEY: GOOGLE_TOKEN_PATH,
 }
 
 
@@ -174,16 +171,6 @@ def get_linkedin_state() -> dict[str, Any] | None:
 def save_linkedin_state(state: dict[str, Any]) -> None:
     """Encrypt and save Playwright storage state."""
     _write_encrypted(LINKEDIN_STATE_PATH, json.dumps(state))
-
-
-def get_google_token_json() -> str | None:
-    """Return the cached Google OAuth user token JSON, if present."""
-    return _read_encrypted(GOOGLE_TOKEN_PATH)
-
-
-def save_google_token_json(token_json: str) -> None:
-    """Encrypt and save the Google OAuth user token JSON."""
-    _write_encrypted(GOOGLE_TOKEN_PATH, token_json)
 
 
 def import_json_file_if_missing(key: str, path: Path) -> bool:

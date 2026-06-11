@@ -1,17 +1,16 @@
 {
-  "title": "LinkedIn Games Tracking",
-  "worksheet_name": "Sheet1",
-  "include_puzzle_numbers": false,
-  "index_prefix": ["date"],
+  "include_day_of_week": true,
+  "include_puzzle_numbers": true,
+  "anchor_game": "zip",
   "games": [
     "zip",
     "tango",
     "queens",
     "patches",
     "mini_sudoku",
+    "wend",
     "crossclimb",
     "wend",
     "pinpoint"
-  ],
-  "index_suffix": ["day_of_week"]
+  ]
 }

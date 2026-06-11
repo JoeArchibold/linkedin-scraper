@@ -184,6 +184,7 @@ def _save_debug(page: Page, debug_dir: Path, slug: str, chiclets_found: bool) ->
 def fetch_all_scores(
     names: Optional[set[str]] = None,
     debug_dir: Optional[Path] = None,
+    anchor_name: Optional[str] = None,
 ) -> list[GameResult]:
     """
     Launch a headless Playwright browser, restore the saved LinkedIn session,
@@ -195,6 +196,11 @@ def fetch_all_scores(
            Pass None (default) to fetch every game.
 
     debug_dir: save a screenshot + HTML dump for every page visited when set.
+
+    anchor_name: display name of a game to prefer as the anchor results page
+                 when no already-recorded game is available. Typically the
+                 game the user plays first each day, so its results page is
+                 the most likely to be complete on a fresh day.
     """
     imported = import_json_file_if_missing(LINKEDIN_STATE_KEY, LINKEDIN_STATE_FILE)
     if imported:
@@ -224,14 +230,22 @@ def fetch_all_scores(
         page = context.new_page()
 
         # ── Determine unplayed games via a completed results page ─────────────
-        # Prefer a game already recorded in the sheet (not in games_to_fetch) as
-        # the anchor since it's guaranteed to be complete. Fall back to the first
-        # game in games_to_fetch, then Zip as a last resort.
+        # Anchor cascade (first match wins):
+        #   1. Any game already recorded in today's row (not in games_to_fetch)
+        #      — guaranteed complete, so the unplayed-list widget loads.
+        #   2. The caller-provided anchor_name, when supplied. Intended for
+        #      "the game the user typically plays first", which is the most
+        #      likely to be complete on a fresh day with nothing yet recorded.
+        #   3. The first game in games_to_fetch as a last resort.
         fetch_names = {g["name"] for g in games_to_fetch}
-        anchor = (
-            next((g for g in GAMES if g["name"] not in fetch_names), None)
-            or games_to_fetch[0]
+        already_recorded = next(
+            (g for g in GAMES if g["name"] not in fetch_names), None
         )
+        configured_anchor = (
+            next((g for g in GAMES if g["name"] == anchor_name), None)
+            if anchor_name else None
+        )
+        anchor = already_recorded or configured_anchor or games_to_fetch[0]
         logger.info(f"Loading anchor results page ({anchor['name']}) to check unplayed games …")
         page.goto(anchor["url"], wait_until="domcontentloaded", timeout=20_000)
 

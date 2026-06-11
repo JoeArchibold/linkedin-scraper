@@ -1,21 +1,18 @@
 """
-JSON-driven sheet layout.
+JSON-driven CSV column layout.
 
-A layout file (`sheet_layout.json` by default) declares:
-  - which non-game "index" columns appear before and after the game columns
-  - which games are included, and in what order
-  - whether each game writes a puzzle-number column in addition to score/avg
-  - the spreadsheet title and worksheet name used by create_sheet.py
+`sheet_layout.json` declares:
+  - `games`: which games to include, in column order
+  - `include_puzzle_numbers`: whether to add a "<Game> #" column per game
+  - `include_day_of_week`: whether to add a "Day of Week" column
 
-The same layout drives create_sheet.py (which creates fresh spreadsheets with
-appropriate headers/formatting) and sheets_updater.py / csv_writer.py (which
-look up columns by header so reordering or exclusions Just Work).
+The first column is always `Date`. If `include_day_of_week` is true, `Day of
+Week` is the second column. Game columns follow in `games` order; each game
+produces `[#,] score, avg` cells.
 
-Column key naming (canonical, used by callers):
-  - "date", "day_of_week"             (index columns)
-  - "<game_key>.score"                (always present per included game)
-  - "<game_key>.avg"                  (always present per included game)
-  - "<game_key>.number"               (only if include_puzzle_numbers is true)
+Internal column key naming used by callers:
+  - "date", "day_of_week"
+  - "<game_key>.score", "<game_key>.avg", "<game_key>.number"
 """
 
 from __future__ import annotations
@@ -28,29 +25,34 @@ from typing import Optional
 
 from config import GAMES, SHEET_LAYOUT_FILE
 
-# ── Built-in non-game columns ─────────────────────────────────────────────────
-
-INDEX_COLUMNS: dict[str, dict[str, str]] = {
-    "date":        {"header": "Date",        "kind": "date"},
-    "day_of_week": {"header": "Day of Week", "kind": "text"},
-}
-
 
 @dataclass
 class ColumnSpec:
-    key: str                       # canonical key (see module docstring)
-    header: str                    # text written to row 1
-    kind: str                      # "date" | "text" | "time" | "guesses" | "number"
-    game_key: Optional[str] = None # set for game columns; None for index columns
+    key: str                        # canonical key (see module docstring)
+    header: str                     # text written to row 1
+    kind: str                       # "date" | "text" | "time" | "guesses" | "number"
+    game_key: Optional[str] = None  # set for game columns; None for index columns
 
 
 @dataclass
 class Layout:
-    title: str
-    worksheet_name: str
     include_puzzle_numbers: bool
+    include_day_of_week: bool
     columns: list[ColumnSpec]
+    anchor_game: Optional[str] = None  # game key whose results page is the
+                                       # preferred fallback when nothing is
+                                       # recorded yet today; None = scraper
+                                       # picks the first to-fetch game
     raw: dict = field(default_factory=dict)
+
+    def anchor_game_name(self) -> Optional[str]:
+        """Resolve anchor_game (a key) to its display name, or None if unset."""
+        if not self.anchor_game:
+            return None
+        for g in GAMES:
+            if g["key"] == self.anchor_game:
+                return g["name"]
+        return None
 
     def included_game_keys(self) -> list[str]:
         """Game keys present in the layout, in column order."""
@@ -107,107 +109,91 @@ def _game_columns(game: dict, include_number: bool) -> list[ColumnSpec]:
     return cols
 
 
-def _index_column(idx_key: str) -> ColumnSpec:
-    if idx_key not in INDEX_COLUMNS:
-        raise ValueError(
-            f"Unknown index column: {idx_key!r}. "
-            f"Valid keys: {list(INDEX_COLUMNS)}"
-        )
-    meta = INDEX_COLUMNS[idx_key]
-    return ColumnSpec(key=idx_key, header=meta["header"], kind=meta["kind"])
-
-
 def load_layout(path: Path | None = None) -> Layout:
     """Load and validate a layout file. Falls back to SHEET_LAYOUT_FILE."""
     path = Path(path) if path else SHEET_LAYOUT_FILE
     if not path.exists():
         raise FileNotFoundError(
             f"Sheet layout file not found: {path}\n"
-            "Copy sheet_layout.json from the repo or run create_sheet.py "
-            "after writing one."
+            "Copy the default sheet_layout.json from the repo."
         )
 
     data = json.loads(path.read_text(encoding="utf-8"))
     include_numbers = bool(data.get("include_puzzle_numbers", False))
+    include_dow = bool(data.get("include_day_of_week", True))
 
-    columns: list[ColumnSpec] = []
-    for idx_key in data.get("index_prefix", []):
-        columns.append(_index_column(idx_key))
+    columns: list[ColumnSpec] = [
+        ColumnSpec(key="date", header="Date", kind="date"),
+    ]
+    if include_dow:
+        columns.append(ColumnSpec(key="day_of_week", header="Day of Week", kind="text"))
 
-    for game_key in data.get("games", []):
+    included_keys = list(data.get("games", []))
+    for game_key in included_keys:
         columns.extend(_game_columns(_game_by_key(game_key), include_numbers))
 
-    for idx_key in data.get("index_suffix", []):
-        columns.append(_index_column(idx_key))
+    if len(columns) <= (2 if include_dow else 1):
+        raise ValueError(f"Layout {path} has no game columns")
 
-    if not columns:
-        raise ValueError(f"Layout {path} produced no columns")
+    anchor = data.get("anchor_game")
+    if anchor is not None:
+        if not isinstance(anchor, str):
+            raise ValueError(
+                f"anchor_game must be a string game key, got {type(anchor).__name__}"
+            )
+        # Validate against known keys (uses GAMES, not just included games,
+        # so a typo gets caught even if the user has temporarily excluded the
+        # anchor). Enforce inclusion here too: anchoring on an excluded game
+        # is almost certainly a mistake.
+        _game_by_key(anchor)  # raises with a helpful message on typos
+        if anchor not in included_keys:
+            raise ValueError(
+                f"anchor_game {anchor!r} is not present in the 'games' list. "
+                "Either add it to 'games' or pick a game that is included."
+            )
 
     return Layout(
-        title=data.get("title", "LinkedIn Games Tracking"),
-        worksheet_name=data.get("worksheet_name", "Sheet1"),
         include_puzzle_numbers=include_numbers,
+        include_day_of_week=include_dow,
         columns=columns,
+        anchor_game=anchor,
         raw=data,
     )
 
 
-# ── A1 helpers ────────────────────────────────────────────────────────────────
-
-def col_letter(idx: int) -> str:
-    """0-based column index -> A1 letter (A, B, ..., Z, AA, AB, ...)."""
-    if idx < 0:
-        raise ValueError(idx)
-    s = ""
-    n = idx + 1
-    while n:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
-def layout_letters(layout: Layout) -> dict[str, str]:
-    """Map column key -> A1 letter, based solely on the layout's declared order."""
-    return {c.key: col_letter(i) for i, c in enumerate(layout.columns)}
-
-
-# ── Header-driven mapping (for the live sheet) ────────────────────────────────
+# ── Header-driven mapping (for the live CSV) ─────────────────────────────────
 
 def _norm(header: str) -> str:
     """Aggressive normalization: strip case and all non-alphanumerics."""
     return re.sub(r"[^a-z0-9]", "", header.lower())
 
 
-def column_map_from_headers(headers: list[str], layout: Layout) -> dict[str, str]:
+def column_map_from_headers(headers: list[str], layout: Layout) -> dict[str, int]:
     """
-    Match a sheet's row-1 headers against the layout and return
-    {column_key: A1_letter} for every match. Columns absent from the sheet are
-    silently omitted, which means callers naturally skip them.
+    Match a CSV's header row against the layout and return
+    {column_key: 0_based_index} for every match. Columns absent from the CSV
+    are silently omitted, which lets the writer skip them.
 
-    The matcher is tolerant of casing, punctuation, and whitespace variants
-    (so existing sheets with headers like "Zip time" or "Zip Avg." match
-    canonical "Zip Time" / "Zip Avg").
+    Tolerant of casing, punctuation, and whitespace variants.
     """
-    norm_to_letter: dict[str, str] = {}
+    norm_to_idx: dict[str, int] = {}
     for i, h in enumerate(headers):
         if not h:
             continue
         norm = _norm(h)
-        if norm and norm not in norm_to_letter:
-            norm_to_letter[norm] = col_letter(i)
+        if norm and norm not in norm_to_idx:
+            norm_to_idx[norm] = i
 
-    mapping: dict[str, str] = {}
+    mapping: dict[str, int] = {}
     for col in layout.columns:
-        letter = norm_to_letter.get(_norm(col.header))
-        if letter is None and col.key.endswith(".avg"):
-            # Legacy variant: some sheets use "<Name> Avg." (with period) or
-            # "<Name> Average". Normalization handles the period; try the
-            # spelled-out form just in case.
+        idx = norm_to_idx.get(_norm(col.header))
+        if idx is None and col.key.endswith(".avg"):
+            # Legacy "<Name> Average" spelling
             game_name = next(
                 (g["name"] for g in GAMES if g["key"] == col.game_key), None
             )
             if game_name:
-                letter = norm_to_letter.get(_norm(f"{game_name} Average"))
-        if letter is not None:
-            mapping[col.key] = letter
+                idx = norm_to_idx.get(_norm(f"{game_name} Average"))
+        if idx is not None:
+            mapping[col.key] = idx
     return mapping
