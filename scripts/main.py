@@ -1,14 +1,18 @@
 """
-LinkedIn Games daily score collector (CSV-only build).
+LinkedIn Games daily score collector (writes a local JSON store).
 
 Usage:
     python main.py              # smart mode: skip games already recorded today
     python main.py --update     # fetch all games and refresh scores + averages
-    python main.py --dry-run    # print what would be written without touching the CSV
+    python main.py --dry-run    # print what would be written without touching the store
     python main.py --debug      # save a screenshot + HTML dump for every page visited
     python main.py --summary-only  # print only the results table plus errors
     python main.py --timezone America/Chicago  # override auto-detected local timezone
-    python main.py --output path/to/scores.csv # write to a specific CSV file
+    python main.py --output path/to/scores.json # write to a specific JSON store
+    python main.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
+
+The CSV is a derived view, regenerated from the JSON each time. Use --export-csv to
+refresh it as part of a collection run, or run export_csv.py standalone.
 """
 
 import argparse
@@ -25,10 +29,9 @@ except ImportError:
     _TZLOCAL_AVAILABLE = False
 
 from linkedin_scraper import fetch_all_scores, GameResult
-from csv_writer import get_csv_today_state, write_csv
 from json_writer import get_json_today_state, write_json
 from sheet_layout import load_layout
-from config import DEFAULT_OUTPUT_PATH, SCRIPTS_DIR
+from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR
 
 # LinkedIn games reset at midnight Pacific time
 _LINKEDIN_TZ = ZoneInfo("America/Los_Angeles")
@@ -127,9 +130,9 @@ def print_results(results: list[GameResult], show_status: bool = False) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and append them to a local CSV file")
+    parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and record them in a local JSON store")
     parser.add_argument("--update",      action="store_true", help="Fetch all games and update scores + averages regardless of existing data")
-    parser.add_argument("--dry-run",     action="store_true", help="Print scores without writing to the CSV")
+    parser.add_argument("--dry-run",     action="store_true", help="Print scores without writing to the store")
     parser.add_argument("--debug",       action="store_true", help="Save a screenshot + HTML dump for every page visited")
     parser.add_argument("--show-status", action="store_true", help="Include a Status column in the results table")
     parser.add_argument("--summary-only", action="store_true",
@@ -138,9 +141,15 @@ def main() -> int:
                         help="Your local IANA timezone name (e.g. America/New_York). "
                              "Auto-detected if omitted.")
     parser.add_argument("--output",      metavar="FILE", default=None,
-                        help="Path to the results file. Overrides $RESULTS_JSON/$RESULTS_CSV and "
-                             f"the default (currently {DEFAULT_OUTPUT_PATH}). A '.json' extension "
-                             "writes the JSON store; any other extension writes CSV.")
+                        help="Path to the JSON store. Overrides $RESULTS_JSON and the default "
+                             f"(currently {DEFAULT_OUTPUT_PATH}).")
+    parser.add_argument("--export-csv",  action="store_true",
+                        help="After writing the JSON store, also regenerate a CSV view "
+                             "(for Google Drive sync -> Sheets import). Destination comes "
+                             "from $RESULTS_CSV, --csv-output, or the JSON path with a .csv suffix.")
+    parser.add_argument("--csv-output",  metavar="FILE", default=None,
+                        help="Path for the exported CSV. Implies --export-csv. Overrides "
+                             f"$RESULTS_CSV (currently {DEFAULT_RESULTS_CSV}).")
     args = parser.parse_args()
 
     if args.summary_only:
@@ -161,16 +170,11 @@ def main() -> int:
 
     # ── Check existing data ───────────────────────────────────────────────────
     output_path = Path(args.output).expanduser() if args.output else DEFAULT_OUTPUT_PATH
-    is_json = output_path.suffix.lower() == ".json"
-    fmt = "JSON" if is_json else "CSV"
-    logger.info(f"Output file: {output_path} ({fmt})")
+    logger.info(f"Output file: {output_path}")
     try:
-        if is_json:
-            row_exists, missing_games = get_json_today_state(output_path, linkedin_date)
-        else:
-            row_exists, missing_games = get_csv_today_state(output_path, linkedin_date)
+        row_exists, missing_games = get_json_today_state(output_path, linkedin_date)
     except Exception as exc:
-        logger.error(f"Could not read {fmt} file: {exc}")
+        logger.error(f"Could not read JSON store: {exc}")
         return 1
     row_num = True if row_exists else None   # reuse same None-means-new-row logic below
 
@@ -229,15 +233,31 @@ def main() -> int:
         return 0
 
     # ── Write results ──────────────────────────────────────────────────────────
-    logger.info(f"Writing to {fmt}: {output_path} …")
+    logger.info(f"Writing to JSON store: {output_path} …")
     try:
-        if is_json:
-            write_json(results, linkedin_date, output_path)
-        else:
-            write_csv(results, linkedin_date, output_path)
+        write_json(results, linkedin_date, output_path)
     except Exception as exc:
-        logger.error(f"{fmt} write failed: {exc}")
+        logger.error(f"JSON write failed: {exc}")
         return 1
+
+    # ── Optional CSV export (opt-in) ───────────────────────────────────────────
+    # The JSON store is already safely written above; a CSV failure here is
+    # reported but does not undo that.
+    if args.export_csv or args.csv_output:
+        from export_csv import export_to_csv
+        if args.csv_output:
+            csv_path = Path(args.csv_output).expanduser()
+        elif DEFAULT_RESULTS_CSV:
+            csv_path = DEFAULT_RESULTS_CSV
+        else:
+            csv_path = output_path.with_suffix(".csv")
+        logger.info(f"Exporting CSV view to: {csv_path} …")
+        try:
+            n = export_to_csv(output_path, csv_path)
+            logger.info(f"CSV exported: {csv_path} ({n} row(s)).")
+        except Exception as exc:
+            logger.error(f"CSV export failed (JSON store is still saved): {exc}")
+            return 1
 
     logger.info("Done.")
     return 0

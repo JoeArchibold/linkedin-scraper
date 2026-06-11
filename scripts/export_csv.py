@@ -37,7 +37,7 @@ from pathlib import Path
 
 from json_writer import _read_data
 from sheet_layout import Layout, load_layout
-from config import DEFAULT_RESULTS_CSV, DEFAULT_RESULTS_JSON
+from config import DEFAULT_RESULTS_JSON
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def export_to_csv(json_path: Path, csv_path: Path) -> int:
 
 
 def main() -> int:
-    default_json = DEFAULT_RESULTS_JSON or DEFAULT_RESULTS_CSV.with_suffix(".json")
+    default_json = DEFAULT_RESULTS_JSON or (Path.cwd() / "results.json")
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

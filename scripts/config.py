@@ -1,5 +1,5 @@
 """
-Configuration for the LinkedIn Games score collector (CSV-only build).
+Configuration for the LinkedIn Games score collector (JSON store build).
 
 `.env` lives next to this file. Copy `.env.example` to `.env` to customise.
 Nothing in `.env` is required — the script runs with sensible defaults if
@@ -44,15 +44,18 @@ def _resolve_env_path(var: str) -> Path | None:
     return path
 
 
-# Configured output locations (None when the corresponding env var is unset).
+# JSON is the only direct-write store. A configured $RESULTS_JSON sets the
+# default location; otherwise results.json in the current working directory is
+# used. The `--output FILE` flag overrides this at runtime.
 DEFAULT_RESULTS_JSON = _resolve_env_path("RESULTS_JSON")
-DEFAULT_RESULTS_CSV = _resolve_env_path("RESULTS_CSV") or (Path.cwd() / "results.csv")
+DEFAULT_OUTPUT_PATH = DEFAULT_RESULTS_JSON or (Path.cwd() / "results.json")
 
-# Default output used when `--output FILE` is not supplied. JSON is the primary
-# store, so a configured $RESULTS_JSON takes precedence; otherwise fall back to
-# the CSV location. The CLI flag overrides this, and the writer is chosen by the
-# output file's extension (.json -> JSON, anything else -> CSV).
-DEFAULT_OUTPUT_PATH = DEFAULT_RESULTS_JSON or DEFAULT_RESULTS_CSV
+# Optional CSV view of the JSON store. CSV is always derived from the JSON
+# (see export_csv.py); it is never written directly. $RESULTS_CSV sets the
+# destination for the opt-in `--export-csv` run (typically a path inside a
+# Google Drive sync folder so the CSV reaches Sheets without OAuth). When unset,
+# `--export-csv` falls back to the JSON path with a .csv suffix.
+DEFAULT_RESULTS_CSV = _resolve_env_path("RESULTS_CSV")
 
 
 # ── LinkedIn Games ─────────────────────────────────────────────────────────────
