@@ -5,6 +5,12 @@ JSON-driven CSV column layout.
   - `games`: which games to include, in column order
   - `include_puzzle_numbers`: whether to add a "<Game> #" column per game
   - `include_day_of_week`: whether to add a "Day of Week" column
+  - `output_json` (optional): path to the JSON store to write
+  - `output_csv` (optional): path for the exported CSV view
+
+`output_json`/`output_csv` let a deployment declare its paths here instead of in
+`.env`. Relative paths resolve against the layout file's directory. Precedence
+is: CLI flag > layout file > $RESULTS_JSON/$RESULTS_CSV > built-in default.
 
 The first column is always `Date`. If `include_day_of_week` is true, `Day of
 Week` is the second column. Game columns follow in `games` order; each game
@@ -18,12 +24,15 @@ Internal column key naming used by callers:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from config import GAMES, SHEET_LAYOUT_FILE
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,6 +52,10 @@ class Layout:
                                        # preferred fallback when nothing is
                                        # recorded yet today; None = scraper
                                        # picks the first to-fetch game
+    output_json: Optional[Path] = None  # JSON store path declared in the layout;
+                                        # None = fall back to $RESULTS_JSON/default
+    output_csv: Optional[Path] = None   # CSV export path declared in the layout;
+                                        # None = fall back to $RESULTS_CSV/default
     raw: dict = field(default_factory=dict)
 
     def anchor_game_name(self) -> Optional[str]:
@@ -77,6 +90,26 @@ def _game_by_key(key: str) -> dict:
         f"Layout references unknown game key: {key!r}. "
         f"Valid keys: {[g['key'] for g in GAMES]}"
     )
+
+
+def _resolve_layout_path(value: object, base_dir: Path, field_name: str) -> Optional[Path]:
+    """
+    Resolve an output-path value from the layout file.
+
+    Returns None when unset. A relative path is resolved against `base_dir`
+    (the layout file's directory), so paths declared in the layout are portable
+    regardless of the current working directory the script is run from.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{field_name} must be a non-empty string path, got {value!r}"
+        )
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
 
 
 def _game_columns(game: dict, include_number: bool) -> list[ColumnSpec]:
@@ -128,7 +161,27 @@ def load_layout(path: Path | None = None) -> Layout:
     if include_dow:
         columns.append(ColumnSpec(key="day_of_week", header="Day of Week", kind="text"))
 
-    included_keys = list(data.get("games", []))
+    # Deduplicate the games list while preserving first-seen order. A duplicate
+    # game key (easy to introduce by hand and hard to spot in review) would
+    # otherwise emit duplicate columns. We flag it loudly but keep going, so a
+    # stray copy never silently corrupts the layout.
+    raw_keys = list(data.get("games", []))
+    included_keys: list[str] = []
+    duplicates: list[str] = []
+    for game_key in raw_keys:
+        if game_key in included_keys:
+            duplicates.append(game_key)
+            continue
+        included_keys.append(game_key)
+    if duplicates:
+        logger.warning(
+            "Duplicate game(s) in %s 'games' list were ignored: %s. "
+            "Remove the extra entr%s to silence this warning.",
+            path,
+            ", ".join(sorted(set(duplicates))),
+            "y" if len(set(duplicates)) == 1 else "ies",
+        )
+
     for game_key in included_keys:
         columns.extend(_game_columns(_game_by_key(game_key), include_numbers))
 
@@ -152,11 +205,19 @@ def load_layout(path: Path | None = None) -> Layout:
                 "Either add it to 'games' or pick a game that is included."
             )
 
+    # Output paths may be declared in the layout so a deployment needs no .env.
+    # Relative paths resolve against the layout file's directory (see helper).
+    base_dir = path.parent
+    output_json = _resolve_layout_path(data.get("output_json"), base_dir, "output_json")
+    output_csv = _resolve_layout_path(data.get("output_csv"), base_dir, "output_csv")
+
     return Layout(
         include_puzzle_numbers=include_numbers,
         include_day_of_week=include_dow,
         columns=columns,
         anchor_game=anchor,
+        output_json=output_json,
+        output_csv=output_csv,
         raw=data,
     )
 

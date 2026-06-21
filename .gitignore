@@ -7,6 +7,9 @@ scripts/.env.*
 scripts/debug/
 scripts/results.csv
 
+# Local research scratch (games-hub state-signal experiment)
+scripts/research/
+
 # Backups and caches
 backup/
 __pycache__/

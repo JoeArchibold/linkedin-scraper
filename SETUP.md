@@ -68,8 +68,8 @@ The collector creates or uses these local values:
 
 | Location | Purpose |
 |----------|---------|
-| `scripts/.env` | Optional. Currently only used to set `RESULTS_JSON`. Create from `scripts/.env.example`. |
-| `scripts/sheet_layout.json` | Column layout. Controls which games are collected, in what order, and whether to log puzzle numbers and the day of week. |
+| `scripts/.env` | Optional and **deprecated**. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths. Prefer `output_json` / `output_csv` in `sheet_layout.json` instead (see "Output Location"). Create from `scripts/.env.example` if you still need it. |
+| `scripts/sheet_layout.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. |
 | `<user data dir>/linkedin_state.enc` | Fernet-encrypted Playwright storage state for LinkedIn. |
 | `<user data dir>/passphrase.salt` | Created only if the passphrase fallback is used. |
 | OS credential store: `linkedin-games-data-collector` / `fernet-master-key` | 44-byte Fernet key that decrypts the `.enc` file. |
@@ -97,22 +97,43 @@ The master Fernet key is resolved on every run in this order:
 ## Output Location
 
 By default `main.py` writes a JSON store, `results.json`, to whatever directory
-you ran it from. To pin a fixed location, set `RESULTS_JSON` in `scripts/.env`:
+you ran it from. To pin a fixed location, declare it in `scripts/sheet_layout.json`:
 
-```text
-# Windows
-RESULTS_JSON=C:\Users\<you>\Documents\linkedin-games\results.json
-
-# macOS / Linux
-RESULTS_JSON=/Users/<you>/Documents/linkedin-games/results.json
+```jsonc
+{
+  "output_json": "C:/Users/<you>/Documents/linkedin-games/results.json",
+  "output_csv":  "C:/Users/<you>/Documents/linkedin-games/results.csv",
+  "games": [ /* ... */ ]
+}
 ```
 
-Relative paths resolve against the current working directory. The CLI flag
-`--output FILE` overrides both `.env` and the default for one-off runs.
+- Both keys are optional. `output_json` sets the JSON store path; `output_csv`
+  sets the destination for the exported CSV view (used by `--export-csv` and
+  `export_csv.py`).
+- Paths may be absolute or use `~` for your home directory. **Relative paths
+  resolve against the layout file's directory** (i.e. `scripts/`), so they work
+  no matter which directory you launch the script from.
 
-> **Note:** `main.py` writes JSON only. The older `RESULTS_CSV` setting and
-> direct-to-CSV writing have been removed; produce a CSV from the JSON store
-> with `export_csv.py` (see "Exporting to CSV").
+The full resolution order for each path is:
+
+| | JSON store | CSV view |
+|---|---|---|
+| 1. CLI flag | `--output` | `--csv-output` |
+| 2. Layout file | `output_json` | `output_csv` |
+| 3. `.env` *(deprecated)* | `RESULTS_JSON` | `RESULTS_CSV` |
+| 4. Built-in default | `./results.json` | JSON path with a `.csv` suffix |
+
+> **Deprecated:** `scripts/.env` (`RESULTS_JSON` / `RESULTS_CSV`) still works as a
+> lower-precedence fallback, but is deprecated in favour of `output_json` /
+> `output_csv` in the layout file. New setups should not need `.env` at all.
+>
+> Note that `.env` paths resolve against the **current working directory**,
+> whereas layout paths resolve against the **layout file's directory** — another
+> reason to prefer the layout keys.
+
+> **Note:** `main.py` writes the JSON store directly; CSV is always a derived
+> view, produced on demand from the JSON either with `export_csv.py` or by adding
+> `--export-csv` to a collection run (see "Exporting to CSV").
 
 ### JSON store format
 
@@ -150,6 +171,14 @@ Edit `scripts/sheet_layout.json`:
                                      // it's the most likely to be complete.
                                      // Omit/null for current behavior (the
                                      // first game in 'games' is used).
+  "output_json": "results.json",     // optional: where to write the JSON store.
+                                     // Relative paths resolve against this file's
+                                     // directory. Omit to use $RESULTS_JSON or
+                                     // the ./results.json default.
+  "output_csv": "results.csv",       // optional: destination for the exported CSV
+                                     // (used by --export-csv / export_csv.py).
+                                     // Omit to use $RESULTS_CSV or the JSON path
+                                     // with a .csv suffix.
   "games": [                         // order = exported CSV column order; these
     "zip",                           // can be reordered to your preferences
     "tango",                         // or you can omit one or more games to exclude them
@@ -165,7 +194,9 @@ Edit `scripts/sheet_layout.json`:
 
 Valid game keys: `zip`, `tango`, `queens`, `patches`, `mini_sudoku`,
 `crossclimb`, `wend`, `pinpoint`. `anchor_game` must be one of the keys present
-in `games`; otherwise startup fails with a clear error.
+in `games`; otherwise startup fails with a clear error. A game listed more than
+once in `games` is collected only once — the duplicate is ignored and a warning
+is logged so you can remove it.
 
 The layout controls the **exported CSV** (see "Exporting to CSV"); the JSON
 store itself is keyed by game id and is unaffected by column order. Exported CSV
@@ -198,21 +229,26 @@ python main.py
 
 ## Exporting to CSV
 
-`main.py` writes the JSON store only. To produce a spreadsheet-friendly CSV from
-it, use `export_csv.py`:
+CSV is always a derived view of the JSON store. You can produce it two ways:
 
 ```
-# Default: read the configured JSON store, write a CSV beside it
+# As part of a collection run — collect, then regenerate the CSV
+python main.py --export-csv
+
+# Standalone, from an already-collected store
 python export_csv.py
 
-# Explicit input/output
+# Standalone with explicit input/output
 python export_csv.py --input results.json --output scores.csv
 ```
 
 Behavior and notes:
 
-- The default input is `$RESULTS_JSON` (else `./results.json`); the default
-  output is the input path with a `.csv` extension.
+- Both `main.py --export-csv` and `export_csv.py` resolve the CSV destination
+  the same way: `--csv-output`/`--output` flag, then the layout's `output_csv`,
+  then `$RESULTS_CSV` *(deprecated)*, then the JSON path with a `.csv` suffix.
+  The JSON store path that `export_csv.py` reads follows the same precedence as
+  `main.py` (see "Output Location").
 - Columns and their order come from `scripts/sheet_layout.json`, so the CSV
   always reflects the current layout. The file is **regenerated in full** on
   each run — it is never edited in place — which avoids header drift and
@@ -224,8 +260,8 @@ Behavior and notes:
 
 | Flag | Behavior |
 |------|----------|
-| `--input <FILE>` | JSON store to read. Defaults to `$RESULTS_JSON`, else `./results.json`. |
-| `--output <FILE>` | CSV to write. Defaults to the input path with a `.csv` suffix. |
+| `--input <FILE>` | JSON store to read. Defaults to the layout's `output_json`, then `$RESULTS_JSON`, then `./results.json`. |
+| `--output <FILE>` | CSV to write. Defaults to the layout's `output_csv`, then `$RESULTS_CSV`, then the input path with a `.csv` suffix. |
 
 ## Command-Line Parameters
 
@@ -241,7 +277,9 @@ Behavior and notes:
 | `--show-status` | Add a Status column to the printed results table indicating, per game, whether the score was newly fetched, already present, skipped, or errored. Does not affect stored contents. |
 | `--summary-only` | Suppress informational log lines and print only the results table plus errors. Recommended when invoking from a Claude skill or any other context where compact output matters. |
 | `--timezone <TZ>` | Override local-timezone auto-detection used for the "are you running near midnight Pacific?" warning. Accepts any IANA timezone name, e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`. Does **not** change the LinkedIn/Pacific date used for the stored entry. |
-| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `$RESULTS_JSON` in `scripts/.env` > `./results.json` in the current working directory. Relative paths resolve against the CWD. |
+| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `output_json` in `sheet_layout.json` > `$RESULTS_JSON` *(deprecated)* > `./results.json`. A relative `--output` resolves against the CWD. |
+| `--export-csv` | After writing the JSON store, also regenerate the CSV view. Destination precedence: `--csv-output` > `output_csv` in `sheet_layout.json` > `$RESULTS_CSV` *(deprecated)* > the JSON path with a `.csv` suffix. A CSV failure is reported but does not undo the JSON write. |
+| `--csv-output <FILE>` | Path for the exported CSV. Implies `--export-csv`. Overrides the layout's `output_csv` and `$RESULTS_CSV` for this run. |
 
 ### Common invocations
 
@@ -264,7 +302,10 @@ python main.py --debug
 # Write to a one-off location
 python main.py --output ~/Desktop/today.json
 
-# Export the collected store to CSV
+# Collect and refresh the CSV view in one run
+python main.py --export-csv
+
+# Export an already-collected store to CSV
 python export_csv.py --input ~/Desktop/today.json --output ~/Desktop/today.csv
 ```
 
@@ -299,19 +340,50 @@ passphrase prompt with PBKDF2; that mode is not suitable for unattended runs.
 ## Limitations / Known Issues
 
 **Anchor Games**
-Currently, the script needs to open the results page for a game which has been completed
-in order to determine which games have and have not been played yet for the day.  The script 
-defaults to using Zip for this (the value is configurable in the `sheet_layout.json` file), 
-because that is the game I generally play first, and I can typically guarantee that it
-will be played by the time the script runs.  
-  
-Be aware that if the script runs before that game is played,
-it can leave the timer running in the unplayed game and affect your solve times.  If I can determine a way
-to get played/unplayed states of the games without opening a results page I will implement it, but so far
-I have not been able to find another reliable way to get this information (`https:\\linkedin.com\games` shows 
-static icons with different played/unplayed states, but does not provide any usable DOM elements to determine the state from,
-and asset file URLs are likely to be too brittle to be a reliable indicator.)  Pinpoint has no timer, and can be used as a check that
-will not affect solve times, but tends to be less played than the other games, so it may be less reliable.
+To learn which games have and haven't been played yet today, the script opens the
+results page of a single **anchor** game and reads its "Play another game" list.
+That list only renders on a *completed* results page, so the anchor needs to be a
+game that has already been played by the time the script runs. The anchor defaults
+to Zip and is configurable via `anchor_game` in `sheet_layout.json` — set it to
+whichever game you reliably play first.
+
+*Why opening a results page matters:* navigating to an unplayed **timed** game's
+results URL redirects to the playable game and can leave its timer running,
+inflating your solve time. The anchor mechanism exists precisely so the script can
+identify the unplayed games and then **skip** them instead of opening each one.
+
+*Timer-safety guard (when the anchor itself hasn't been played).* If the anchor's
+own results page redirects — i.e. you haven't played the anchor yet — the script
+**stops without probing any other game**, reports every game as not-yet-played, and
+exits without writing (exit code 0). This keeps a too-early run from opening, and
+potentially starting timers on, your other unplayed games. You'll see a warning
+like:
+
+```
+Anchor game (Zip) has not been played yet today — skipping all game probes to
+avoid starting timers on unplayed games. Nothing collected this run; re-run after
+playing the anchor.
+```
+
+Just re-run after you've played the anchor and collection proceeds normally. Two
+practical consequences for **scheduled jobs**:
+
+- Pick an anchor you're confident is played before the job runs. If the anchor
+  isn't played, that run collects nothing (by design) — a later run catches up.
+- The guard still loads the anchor's *own* page (that one navigation is
+  unavoidable), so a timed anchor is itself slightly exposed. Setting
+  `anchor_game` to **`pinpoint`** removes even that risk — Pinpoint has no timer,
+  so loading it when unplayed is harmless. The trade-off is that Pinpoint tends to
+  be played less reliably, so a Pinpoint anchor is best paired with running the
+  job after you know it's done.
+
+*Why not read state from the games hub instead?* `https://www.linkedin.com/games/`
+does show a played/unplayed checkmark per game, but investigation confirmed it is
+baked into the game's static art image with **no** accompanying DOM class,
+attribute, or text — the played and unplayed images are just different assets
+(content-hashed URLs). That signal is opaque (nothing says which image means
+"unplayed") and silently brittle (the hash changes whenever LinkedIn rebuilds the
+asset), so the results-page method above remains the reliable approach.
 
 **Adding or reordering games**
 The JSON store is keyed by game id, so reordering games in `sheet_layout.json`,

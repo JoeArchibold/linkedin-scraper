@@ -168,8 +168,21 @@ def main() -> int:
         if not args.summary_only:
             logging.getLogger().setLevel(logging.DEBUG)
 
+    # ── Load layout (drives columns, anchor, and output paths) ────────────────
+    try:
+        layout = load_layout()
+    except Exception as exc:
+        logger.error(f"Could not read sheet layout: {exc}")
+        return 1
+
     # ── Check existing data ───────────────────────────────────────────────────
-    output_path = Path(args.output).expanduser() if args.output else DEFAULT_OUTPUT_PATH
+    # Output path precedence: --output flag > layout file > $RESULTS_JSON/default.
+    if args.output:
+        output_path = Path(args.output).expanduser()
+    elif layout.output_json:
+        output_path = layout.output_json
+    else:
+        output_path = DEFAULT_OUTPUT_PATH
     logger.info(f"Output file: {output_path}")
     try:
         row_exists, missing_games = get_json_today_state(output_path, linkedin_date)
@@ -194,11 +207,7 @@ def main() -> int:
         logger.info(f"Fetching {len(missing_games)} game(s) with missing scores: {', '.join(missing_games)}")
 
     # ── Fetch ──────────────────────────────────────────────────────────────────
-    try:
-        anchor_name = load_layout().anchor_game_name()
-    except Exception as exc:
-        logger.warning(f"Could not read anchor_game from layout ({exc}); using default.")
-        anchor_name = None
+    anchor_name = layout.anchor_game_name()
 
     try:
         results = fetch_all_scores(
@@ -245,8 +254,12 @@ def main() -> int:
     # reported but does not undo that.
     if args.export_csv or args.csv_output:
         from export_csv import export_to_csv
+        # CSV path precedence: --csv-output flag > layout file > $RESULTS_CSV >
+        # the JSON path with a .csv suffix.
         if args.csv_output:
             csv_path = Path(args.csv_output).expanduser()
+        elif layout.output_csv:
+            csv_path = layout.output_csv
         elif DEFAULT_RESULTS_CSV:
             csv_path = DEFAULT_RESULTS_CSV
         else:

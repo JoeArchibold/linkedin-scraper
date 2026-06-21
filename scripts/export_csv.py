@@ -37,7 +37,7 @@ from pathlib import Path
 
 from json_writer import _read_data
 from sheet_layout import Layout, load_layout
-from config import DEFAULT_RESULTS_JSON
+from config import DEFAULT_RESULTS_JSON, DEFAULT_RESULTS_CSV
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -88,18 +88,36 @@ def export_to_csv(json_path: Path, csv_path: Path) -> int:
 
 
 def main() -> int:
-    default_json = DEFAULT_RESULTS_JSON or (Path.cwd() / "results.json")
+    # Defaults follow the same precedence as a collection run:
+    #   input  : --input  > layout output_json > $RESULTS_JSON > ./results.json
+    #   output : --output > layout output_csv  > $RESULTS_CSV  > input.csv
+    try:
+        layout = load_layout()
+        layout_json, layout_csv = layout.output_json, layout.output_csv
+    except Exception as exc:
+        logger.warning(f"Could not read sheet layout ({exc}); using env/defaults for paths.")
+        layout_json = layout_csv = None
+
+    default_json = layout_json or DEFAULT_RESULTS_JSON or (Path.cwd() / "results.json")
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--input", type=Path, default=default_json,
+    parser.add_argument("--input", type=Path, default=None,
                         help=f"Path to the JSON store (default: {default_json}).")
     parser.add_argument("--output", type=Path, default=None,
-                        help="Path to the CSV to write (default: input path with a .csv suffix).")
+                        help="Path to the CSV to write (default: layout output_csv, "
+                             "$RESULTS_CSV, or the input path with a .csv suffix).")
     args = parser.parse_args()
 
-    json_path: Path = args.input.expanduser()
-    csv_path: Path = (args.output or args.input.with_suffix(".csv")).expanduser()
+    json_path: Path = (args.input or default_json).expanduser()
+    if args.output:
+        csv_path = args.output.expanduser()
+    elif layout_csv:
+        csv_path = layout_csv
+    elif DEFAULT_RESULTS_CSV:
+        csv_path = DEFAULT_RESULTS_CSV
+    else:
+        csv_path = json_path.with_suffix(".csv")
 
     if not json_path.exists():
         logger.error(f"JSON store not found: {json_path}")

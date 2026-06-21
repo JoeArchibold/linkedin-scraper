@@ -21,6 +21,7 @@ from auth_store import (
     import_json_file_if_missing,
 )
 from config import GAMES, LINKEDIN_STATE_FILE
+from sheet_layout import load_layout
 
 logger = logging.getLogger(__name__)
 
@@ -188,12 +189,13 @@ def fetch_all_scores(
 ) -> list[GameResult]:
     """
     Launch a headless Playwright browser, restore the saved LinkedIn session,
-    and scrape game results pages. Returns a list of GameResult objects in the
-    same order as config.GAMES.
+    and scrape game results pages. Returns a list of GameResult objects in
+    layout order (the games included in sheet_layout.json); games excluded from
+    the layout are never fetched or returned.
 
-    names: optional set of game names to fetch. Games not in the set are
-           returned as all-None results so the list length is always len(GAMES).
-           Pass None (default) to fetch every game.
+    names: optional set of game names to fetch. Layout-included games not in the
+           set are returned as all-None placeholders so the list always covers
+           every layout game. Pass None (default) to fetch every layout game.
 
     debug_dir: save a screenshot + HTML dump for every page visited when set.
 
@@ -214,7 +216,21 @@ def fetch_all_scores(
         )
 
     results: list[GameResult] = []
-    games_to_fetch = [g for g in GAMES if names is None or g["name"] in names]
+
+    # The layout (sheet_layout.json) is the source of truth for which games
+    # the collector cares about. Restrict everything below to layout-included
+    # games so excluded games (e.g. CrossClimb) are never fetched, printed, or
+    # returned — even on a "fetch all" run where `names` is None.
+    try:
+        included_names = set(load_layout().included_game_names())
+        layout_games = [g for g in GAMES if g["name"] in included_names]
+    except Exception as exc:
+        logger.warning(f"Could not read layout ({exc}); fetching all configured games.")
+        layout_games = list(GAMES)
+    if not layout_games:
+        layout_games = list(GAMES)
+
+    games_to_fetch = [g for g in layout_games if names is None or g["name"] in names]
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -239,17 +255,18 @@ def fetch_all_scores(
         #   3. The first game in games_to_fetch as a last resort.
         fetch_names = {g["name"] for g in games_to_fetch}
         already_recorded = next(
-            (g for g in GAMES if g["name"] not in fetch_names), None
+            (g for g in layout_games if g["name"] not in fetch_names), None
         )
         configured_anchor = (
-            next((g for g in GAMES if g["name"] == anchor_name), None)
+            next((g for g in layout_games if g["name"] == anchor_name), None)
             if anchor_name else None
         )
         anchor = already_recorded or configured_anchor or games_to_fetch[0]
         logger.info(f"Loading anchor results page ({anchor['name']}) to check unplayed games …")
         page.goto(anchor["url"], wait_until="domcontentloaded", timeout=20_000)
 
-        if "/results/" in page.url:
+        anchor_played = "/results/" in page.url
+        if anchor_played:
             try:
                 page.wait_for_selector(".pr-other-games__list-item", timeout=10_000)
             except Exception:
@@ -262,9 +279,41 @@ def fetch_all_scores(
             logger.debug(f"Anchor game ({anchor['name']}) not yet completed — skipping unplayed check")
             unplayed = set()
 
+        # ── Timer-safety guard: bail out if the anchor itself is unplayed ─────
+        # When the anchor's results page redirected away from /results/, the
+        # anchor game hasn't been played yet, so the unplayed-list widget never
+        # loaded and we don't know which games are safe to open. Probing each
+        # game individually would navigate to its page and can start the timer
+        # on an unplayed *timed* game (see SETUP.md "Anchor Games"). To stay
+        # timer-safe we stop here and report every to-fetch game as unplayed —
+        # only the anchor page itself was loaded. A later run, once the anchor
+        # has been played, collects everything normally. Picking a non-timed
+        # anchor (e.g. Pinpoint) makes even that single anchor load risk-free.
+        if not anchor_played:
+            logger.warning(
+                f"Anchor game ({anchor['name']}) has not been played yet today — "
+                "skipping all game probes to avoid starting timers on unplayed "
+                "games. Nothing collected this run; re-run after playing the anchor."
+            )
+            browser.close()
+            fetched = {
+                g["name"]: GameResult(name=g["name"], score=None, avg=None, unplayed=True)
+                for g in games_to_fetch
+            }
+            return [
+                fetched.get(g["name"], GameResult(name=g["name"], score=None, avg=None))
+                for g in layout_games
+            ]
+
         # ── Fetch each game that needs data and isn't known-unplayed ──────────
+        # Process the anchor first while its results page (loaded above for the
+        # unplayed check) is still the one in the browser. Otherwise an earlier
+        # navigation would leave a different game's results page loaded, and the
+        # `already_loaded` shortcut below — which only checks that *some*
+        # /results/ page is open — would scrape that wrong page for the anchor.
+        fetch_order = sorted(games_to_fetch, key=lambda g: g["name"] != anchor["name"])
         fetched: dict[str, GameResult] = {}
-        for game in games_to_fetch:
+        for game in fetch_order:
             if game["name"] in unplayed:
                 logger.info(f"{game['name']}: not yet played today — skipping")
                 fetched[game["name"]] = GameResult(name=game["name"], score=None, avg=None, unplayed=True)
@@ -276,8 +325,9 @@ def fetch_all_scores(
 
         browser.close()
 
-    # Rebuild in GAMES order; games not in fetch list get all-None placeholders
-    for game in GAMES:
+    # Rebuild in layout order; games not in fetch list get all-None placeholders.
+    # Excluded games are absent from layout_games, so they never appear here.
+    for game in layout_games:
         results.append(fetched.get(game["name"], GameResult(name=game["name"], score=None, avg=None)))
 
     return results
