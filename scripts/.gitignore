@@ -9,7 +9,7 @@ backup/
 
 # Any stray credential/token files in the root scripts dir
 *.json
-!sheet_layout.json
+!config.json
 *.token
 *.key
 *.pem

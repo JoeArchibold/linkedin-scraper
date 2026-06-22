@@ -68,8 +68,8 @@ The collector creates or uses these local values:
 
 | Location | Purpose |
 |----------|---------|
-| `scripts/.env` | Optional and **deprecated**. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths. Prefer `output_json` / `output_csv` in `sheet_layout.json` instead (see "Output Location"). Create from `scripts/.env.example` if you still need it. |
-| `scripts/sheet_layout.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. |
+| `scripts/.env` | Optional and **deprecated**. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths. Prefer `output_path` in `config.json` instead (see "Output Location"). Create from `scripts/.env.example` if you still need it. |
+| `scripts/config.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. |
 | `<user data dir>/linkedin_state.enc` | Fernet-encrypted Playwright storage state for LinkedIn. |
 | `<user data dir>/passphrase.salt` | Created only if the passphrase fallback is used. |
 | OS credential store: `linkedin-games-data-collector` / `fernet-master-key` | 44-byte Fernet key that decrypts the `.enc` file. |
@@ -96,40 +96,44 @@ The master Fernet key is resolved on every run in this order:
 
 ## Output Location
 
-By default `main.py` writes a JSON store, `results.json`, to whatever directory
-you ran it from. To pin a fixed location, declare it in `scripts/sheet_layout.json`:
+**Set an explicit `output_path` in `scripts/config.json`.** This is the single
+most important thing to configure: it pins where your data lives so it never
+depends on which directory a run happens to start in (which matters a lot for
+scheduled jobs). Outputs are a directory (`output_path`) plus two filenames:
 
 ```jsonc
 {
-  "output_json": "C:/Users/<you>/Documents/linkedin-games/results.json",
-  "output_csv":  "C:/Users/<you>/Documents/linkedin-games/results.csv",
+  "output_path": "C:/Users/<you>/Documents/linkedin-games",
+  "output_json": "results.json",   // optional, default results.json
+  "output_csv":  "results.csv",    // optional, default results.csv
   "games": [ /* ... */ ]
 }
 ```
 
-- Both keys are optional. `output_json` sets the JSON store path; `output_csv`
-  sets the destination for the exported CSV view (used by `--export-csv` and
-  `export_csv.py`).
-- Paths may be absolute or use `~` for your home directory. **Relative paths
-  resolve against the layout file's directory** (i.e. `scripts/`), so they work
-  no matter which directory you launch the script from.
+- `output_path` is the directory the JSON store and exported CSV are written to.
+  **An absolute path (or one starting with `~`) is strongly recommended.** A
+  *relative* `output_path` resolves against the current working directory, and
+  if you omit it entirely the directory defaults to that CWD — fine for ad-hoc
+  runs, risky for scheduled ones, which is why an explicit path is preferred.
+- `output_json` / `output_csv` are **bare filenames** within `output_path` (no
+  directory part — a value containing a path separator is rejected). They
+  default to `results.json` / `results.csv`.
 
 The full resolution order for each path is:
 
 | | JSON store | CSV view |
 |---|---|---|
-| 1. CLI flag | `--output` | `--csv-output` |
-| 2. Layout file | `output_json` | `output_csv` |
+| 1. CLI flag | `--output` (full path) | `--csv-output` (full path) |
+| 2. Config file | `output_path` + `output_json` | `output_path` + `output_csv` |
 | 3. `.env` *(deprecated)* | `RESULTS_JSON` | `RESULTS_CSV` |
-| 4. Built-in default | `./results.json` | JSON path with a `.csv` suffix |
+| 4. Built-in default | `./results.json` (CWD) | JSON path with a `.csv` suffix |
 
 > **Deprecated:** `scripts/.env` (`RESULTS_JSON` / `RESULTS_CSV`) still works as a
-> lower-precedence fallback, but is deprecated in favour of `output_json` /
-> `output_csv` in the layout file. New setups should not need `.env` at all.
+> lower-precedence fallback, but is deprecated in favour of `output_path` in the
+> config file. New setups should not need `.env` at all.
 >
-> Note that `.env` paths resolve against the **current working directory**,
-> whereas layout paths resolve against the **layout file's directory** — another
-> reason to prefer the layout keys.
+> Both `.env` paths and a relative `output_path` resolve against the **current
+> working directory**; prefer an absolute `output_path` so the location is fixed.
 
 > **Note:** `main.py` writes the JSON store directly; CSV is always a derived
 > view, produced on demand from the JSON either with `export_csv.py` or by adding
@@ -159,7 +163,7 @@ swapped into place), so an interrupted run cannot corrupt the store.
 
 ## Customising Which Games Are Collected
 
-Edit `scripts/sheet_layout.json`:
+Edit `scripts/config.json`:
 
 ```jsonc
 {
@@ -171,14 +175,19 @@ Edit `scripts/sheet_layout.json`:
                                      // it's the most likely to be complete.
                                      // Omit/null for current behavior (the
                                      // first game in 'games' is used).
-  "output_json": "results.json",     // optional: where to write the JSON store.
-                                     // Relative paths resolve against this file's
-                                     // directory. Omit to use $RESULTS_JSON or
-                                     // the ./results.json default.
-  "output_csv": "results.csv",       // optional: destination for the exported CSV
-                                     // (used by --export-csv / export_csv.py).
-                                     // Omit to use $RESULTS_CSV or the JSON path
-                                     // with a .csv suffix.
+  "output_path": "~/linkedin-games", // directory the outputs are written to.
+                                     // Absolute or ~ recommended. A relative
+                                     // value resolves against the directory you
+                                     // run from; omit to default to that CWD.
+  "output_json": "results.json",     // JSON store filename within output_path
+                                     // (bare filename). Default results.json.
+  "output_csv": "results.csv",       // exported-CSV filename within output_path
+                                     // (bare filename). Default results.csv.
+  "export_csv_on_run": false,        // optional: when true, regenerate the CSV
+                                     // automatically after every collection run,
+                                     // as if --export-csv were always passed.
+                                     // Default false. (No effect on --dry-run or
+                                     // when no new scores were written.)
   "games": [                         // order = exported CSV column order; these
     "zip",                           // can be reordered to your preferences
     "tango",                         // or you can omit one or more games to exclude them
@@ -229,7 +238,7 @@ python main.py
 
 ## Exporting to CSV
 
-CSV is always a derived view of the JSON store. You can produce it two ways:
+CSV is always a derived view of the JSON store. You can produce it three ways:
 
 ```
 # As part of a collection run — collect, then regenerate the CSV
@@ -242,14 +251,20 @@ python export_csv.py
 python export_csv.py --input results.json --output scores.csv
 ```
 
+To regenerate the CSV on **every** run without passing `--export-csv`, set
+`"export_csv_on_run": true` in `config.json`. It behaves exactly as if
+`--export-csv` were always passed: the CSV is rewritten after each run that
+writes new scores (and skipped on `--dry-run` or when nothing new was
+collected). The destination follows the same precedence as below.
+
 Behavior and notes:
 
 - Both `main.py --export-csv` and `export_csv.py` resolve the CSV destination
-  the same way: `--csv-output`/`--output` flag, then the layout's `output_csv`,
-  then `$RESULTS_CSV` *(deprecated)*, then the JSON path with a `.csv` suffix.
-  The JSON store path that `export_csv.py` reads follows the same precedence as
-  `main.py` (see "Output Location").
-- Columns and their order come from `scripts/sheet_layout.json`, so the CSV
+  the same way: `--csv-output`/`--output` flag, then the config's
+  `output_path`/`output_csv`, then `$RESULTS_CSV` *(deprecated)*, then the JSON
+  path with a `.csv` suffix. The JSON store path that `export_csv.py` reads
+  follows the same precedence as `main.py` (see "Output Location").
+- Columns and their order come from `scripts/config.json`, so the CSV
   always reflects the current layout. The file is **regenerated in full** on
   each run — it is never edited in place — which avoids header drift and
   column-misalignment problems.
@@ -260,8 +275,8 @@ Behavior and notes:
 
 | Flag | Behavior |
 |------|----------|
-| `--input <FILE>` | JSON store to read. Defaults to the layout's `output_json`, then `$RESULTS_JSON`, then `./results.json`. |
-| `--output <FILE>` | CSV to write. Defaults to the layout's `output_csv`, then `$RESULTS_CSV`, then the input path with a `.csv` suffix. |
+| `--input <FILE>` | JSON store to read. Defaults to the config's `output_path`/`output_json`, then `$RESULTS_JSON`, then `./results.json`. |
+| `--output <FILE>` | CSV to write. Defaults to the config's `output_path`/`output_csv`, then `$RESULTS_CSV`, then the input path with a `.csv` suffix. |
 
 ## Command-Line Parameters
 
@@ -277,9 +292,9 @@ Behavior and notes:
 | `--show-status` | Add a Status column to the printed results table indicating, per game, whether the score was newly fetched, already present, skipped, or errored. Does not affect stored contents. |
 | `--summary-only` | Suppress informational log lines and print only the results table plus errors. Recommended when invoking from a Claude skill or any other context where compact output matters. |
 | `--timezone <TZ>` | Override local-timezone auto-detection used for the "are you running near midnight Pacific?" warning. Accepts any IANA timezone name, e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`. Does **not** change the LinkedIn/Pacific date used for the stored entry. |
-| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `output_json` in `sheet_layout.json` > `$RESULTS_JSON` *(deprecated)* > `./results.json`. A relative `--output` resolves against the CWD. |
-| `--export-csv` | After writing the JSON store, also regenerate the CSV view. Destination precedence: `--csv-output` > `output_csv` in `sheet_layout.json` > `$RESULTS_CSV` *(deprecated)* > the JSON path with a `.csv` suffix. A CSV failure is reported but does not undo the JSON write. |
-| `--csv-output <FILE>` | Path for the exported CSV. Implies `--export-csv`. Overrides the layout's `output_csv` and `$RESULTS_CSV` for this run. |
+| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` *(deprecated)* > `./results.json`. A relative `--output` resolves against the CWD. |
+| `--export-csv` | After writing the JSON store, also regenerate the CSV view. Destination precedence: `--csv-output` > `output_path`/`output_csv` in `config.json` > `$RESULTS_CSV` *(deprecated)* > the JSON path with a `.csv` suffix. A CSV failure is reported but does not undo the JSON write. |
+| `--csv-output <FILE>` | Path for the exported CSV. Implies `--export-csv`. Overrides the config's `output_path`/`output_csv` and `$RESULTS_CSV` for this run. |
 
 ### Common invocations
 
@@ -344,7 +359,7 @@ To learn which games have and haven't been played yet today, the script opens th
 results page of a single **anchor** game and reads its "Play another game" list.
 That list only renders on a *completed* results page, so the anchor needs to be a
 game that has already been played by the time the script runs. The anchor defaults
-to Zip and is configurable via `anchor_game` in `sheet_layout.json` — set it to
+to Zip and is configurable via `anchor_game` in `config.json` — set it to
 whichever game you reliably play first.
 
 *Why opening a results page matters:* navigating to an unplayed **timed** game's
@@ -365,9 +380,13 @@ avoid starting timers on unplayed games. Nothing collected this run; re-run afte
 playing the anchor.
 ```
 
-Just re-run after you've played the anchor and collection proceeds normally. Two
-practical consequences for **scheduled jobs**:
+Just re-run after you've played the anchor and collection proceeds normally.
+Three practical consequences for **scheduled jobs**:
 
+- **Set an explicit, absolute `output_path`** (see "Output Location"). A scheduled
+  job's working directory is often not where you think, so relying on the CWD
+  default can scatter `results.json` in unexpected places. Pinning `output_path`
+  matters most for unattended runs.
 - Pick an anchor you're confident is played before the job runs. If the anchor
   isn't played, that run collects nothing (by design) — a later run catches up.
 - The guard still loads the anchor's *own* page (that one navigation is
@@ -386,12 +405,12 @@ attribute, or text — the played and unplayed images are just different assets
 asset), so the results-page method above remains the reliable approach.
 
 **Adding or reordering games**
-The JSON store is keyed by game id, so reordering games in `sheet_layout.json`,
+The JSON store is keyed by game id, so reordering games in `config.json`,
 or removing one, takes effect immediately with no migration — existing entries
 are left untouched and the exported CSV simply regenerates in the new order.
 Adding a brand-new LinkedIn game still requires a small code change: add an entry
 to `GAMES` in `config.py` (id, display name, results URL, and whether it is
-timed) and include its id in `sheet_layout.json`. Note that on a new game's first
+timed) and include its id in `config.json`. Note that on a new game's first
 day LinkedIn may not report a daily average yet, so the average can be briefly
 blank.
 

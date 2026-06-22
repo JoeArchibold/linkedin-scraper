@@ -43,14 +43,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 LINKEDIN_STATE_PATH = DATA_DIR / "linkedin_state.enc"
 SALT_PATH = DATA_DIR / "passphrase.salt"
 
-# Logical identifier kept for backwards-compatibility with callers that still
-# pass it to import_json_file_if_missing().
-LINKEDIN_STATE_KEY = "linkedin_state"
-
-_TARGETS = {
-    LINKEDIN_STATE_KEY: LINKEDIN_STATE_PATH,
-}
-
 
 class AuthStoreError(RuntimeError):
     """Raised when the encrypted store cannot be read or written."""
@@ -171,17 +163,3 @@ def get_linkedin_state() -> dict[str, Any] | None:
 def save_linkedin_state(state: dict[str, Any]) -> None:
     """Encrypt and save Playwright storage state."""
     _write_encrypted(LINKEDIN_STATE_PATH, json.dumps(state))
-
-
-def import_json_file_if_missing(key: str, path: Path) -> bool:
-    """
-    Migrate a legacy plaintext JSON auth file into the encrypted store if no
-    encrypted copy exists yet. Returns True when a migration was performed.
-    """
-    dest = _TARGETS.get(key)
-    if dest is None:
-        raise AuthStoreError(f"Unknown auth target: {key!r}")
-    if dest.exists() or not path.exists():
-        return False
-    _write_encrypted(dest, path.read_text(encoding="utf-8"))
-    return True

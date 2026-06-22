@@ -15,12 +15,8 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
-from auth_store import (
-    LINKEDIN_STATE_KEY,
-    get_linkedin_state,
-    import_json_file_if_missing,
-)
-from config import GAMES, LINKEDIN_STATE_FILE
+from auth_store import get_linkedin_state
+from config import GAMES
 from sheet_layout import load_layout
 
 logger = logging.getLogger(__name__)
@@ -190,7 +186,7 @@ def fetch_all_scores(
     """
     Launch a headless Playwright browser, restore the saved LinkedIn session,
     and scrape game results pages. Returns a list of GameResult objects in
-    layout order (the games included in sheet_layout.json); games excluded from
+    layout order (the games included in config.json); games excluded from
     the layout are never fetched or returned.
 
     names: optional set of game names to fetch. Layout-included games not in the
@@ -204,10 +200,6 @@ def fetch_all_scores(
                  game the user plays first each day, so its results page is
                  the most likely to be complete on a fresh day.
     """
-    imported = import_json_file_if_missing(LINKEDIN_STATE_KEY, LINKEDIN_STATE_FILE)
-    if imported:
-        logger.info("Imported legacy LinkedIn session file into the OS credential store.")
-
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
         raise FileNotFoundError(
@@ -217,7 +209,7 @@ def fetch_all_scores(
 
     results: list[GameResult] = []
 
-    # The layout (sheet_layout.json) is the source of truth for which games
+    # The layout (config.json) is the source of truth for which games
     # the collector cares about. Restrict everything below to layout-included
     # games so excluded games (e.g. CrossClimb) are never fetched, printed, or
     # returned — even on a "fetch all" run where `names` is None.

@@ -14,16 +14,10 @@ load_dotenv(Path(__file__).parent / ".env")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPTS_DIR = Path(__file__).parent
-AUTH_DIR = SCRIPTS_DIR / "auth"
-AUTH_DIR.mkdir(exist_ok=True)
 
-# Legacy Playwright browser state file. If present, it is migrated into the
-# encrypted store on first run and can then be deleted.
-LINKEDIN_STATE_FILE = AUTH_DIR / "linkedin_state.json"
-
-# Path to the JSON layout file that controls which games appear in the output.
-# See sheet_layout.py.
-SHEET_LAYOUT_FILE = SCRIPTS_DIR / "sheet_layout.json"
+# Path to the JSON config file that controls which games appear in the output,
+# the output paths, and related options. Parsed by sheet_layout.py.
+CONFIG_FILE = SCRIPTS_DIR / "config.json"
 
 
 # ── Output ─────────────────────────────────────────────────────────────────────
@@ -59,7 +53,7 @@ DEFAULT_RESULTS_CSV = _resolve_env_path("RESULTS_CSV")
 
 
 # ── LinkedIn Games ─────────────────────────────────────────────────────────────
-# `key` is the stable identifier used by sheet_layout.json. `name` is the
+# `key` is the stable identifier used by config.json. `name` is the
 # human-readable display name used for log lines, scraper lookups, and as the
 # base for column headers.
 GAMES = [

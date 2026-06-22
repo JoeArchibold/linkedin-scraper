@@ -1,16 +1,23 @@
 """
-JSON-driven CSV column layout.
+JSON-driven configuration and CSV column layout.
 
-`sheet_layout.json` declares:
+`config.json` declares:
   - `games`: which games to include, in column order
   - `include_puzzle_numbers`: whether to add a "<Game> #" column per game
   - `include_day_of_week`: whether to add a "Day of Week" column
-  - `output_json` (optional): path to the JSON store to write
-  - `output_csv` (optional): path for the exported CSV view
+  - `output_path` (optional): directory the outputs are written to. A relative
+    value resolves against the current working directory; absolute paths and a
+    leading `~` are honoured as-is. Defaults to the current working directory.
+  - `output_json` (optional): JSON store filename within `output_path`
+    (default `results.json`). A bare filename — no directory component.
+  - `output_csv` (optional): exported-CSV filename within `output_path`
+    (default `results.csv`). A bare filename — no directory component.
+  - `export_csv_on_run` (optional): regenerate the CSV automatically after
+    every collection run, without needing the --export-csv flag
 
-`output_json`/`output_csv` let a deployment declare its paths here instead of in
-`.env`. Relative paths resolve against the layout file's directory. Precedence
-is: CLI flag > layout file > $RESULTS_JSON/$RESULTS_CSV > built-in default.
+`output_path`/`output_json`/`output_csv` let a deployment declare where output
+goes here instead of in `.env`. Precedence is: CLI flag > config file >
+$RESULTS_JSON/$RESULTS_CSV > built-in default (./results.json next to the CWD).
 
 The first column is always `Date`. If `include_day_of_week` is true, `Day of
 Week` is the second column. Game columns follow in `games` order; each game
@@ -30,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from config import GAMES, SHEET_LAYOUT_FILE
+from config import GAMES, CONFIG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +59,12 @@ class Layout:
                                        # preferred fallback when nothing is
                                        # recorded yet today; None = scraper
                                        # picks the first to-fetch game
-    output_json: Optional[Path] = None  # JSON store path declared in the layout;
-                                        # None = fall back to $RESULTS_JSON/default
-    output_csv: Optional[Path] = None   # CSV export path declared in the layout;
-                                        # None = fall back to $RESULTS_CSV/default
+    output_json: Optional[Path] = None  # composed output_path/output_json; None
+                                        # = fall back to $RESULTS_JSON/default
+    output_csv: Optional[Path] = None   # composed output_path/output_csv; None
+                                        # = fall back to $RESULTS_CSV/default
+    export_csv_on_run: bool = False     # regenerate the CSV after every run, as
+                                        # if --export-csv were always passed
     raw: dict = field(default_factory=dict)
 
     def anchor_game_name(self) -> Optional[str]:
@@ -92,24 +101,43 @@ def _game_by_key(key: str) -> dict:
     )
 
 
-def _resolve_layout_path(value: object, base_dir: Path, field_name: str) -> Optional[Path]:
+def _resolve_output_dir(value: object) -> Optional[Path]:
     """
-    Resolve an output-path value from the layout file.
+    Resolve the `output_path` directory, or None when unset.
 
-    Returns None when unset. A relative path is resolved against `base_dir`
-    (the layout file's directory), so paths declared in the layout are portable
-    regardless of the current working directory the script is run from.
+    A relative value resolves against the current working directory; absolute
+    paths and a leading ``~`` are honoured as-is. None means "not configured"
+    (callers default the directory to the CWD).
     """
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ValueError(
-            f"{field_name} must be a non-empty string path, got {value!r}"
+            f"output_path must be a non-empty directory path string, got {value!r}"
         )
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = (base_dir / path).resolve()
+        path = (Path.cwd() / path).resolve()
     return path
+
+
+def _output_filename(value: object, field_name: str) -> Optional[str]:
+    """
+    Validate a bare output filename (output_json / output_csv), or None if unset.
+
+    These name a file *within* `output_path`, so a value containing a directory
+    separator is rejected with guidance to use output_path for the directory.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty filename string, got {value!r}")
+    if "/" in value or "\\" in value or value.strip() in (".", ".."):
+        raise ValueError(
+            f"{field_name} must be a bare filename without a directory (got {value!r}); "
+            "put the directory in output_path instead."
+        )
+    return value.strip()
 
 
 def _game_columns(game: dict, include_number: bool) -> list[ColumnSpec]:
@@ -143,12 +171,12 @@ def _game_columns(game: dict, include_number: bool) -> list[ColumnSpec]:
 
 
 def load_layout(path: Path | None = None) -> Layout:
-    """Load and validate a layout file. Falls back to SHEET_LAYOUT_FILE."""
-    path = Path(path) if path else SHEET_LAYOUT_FILE
+    """Load and validate the config file. Falls back to CONFIG_FILE."""
+    path = Path(path) if path else CONFIG_FILE
     if not path.exists():
         raise FileNotFoundError(
-            f"Sheet layout file not found: {path}\n"
-            "Copy the default sheet_layout.json from the repo."
+            f"Config file not found: {path}\n"
+            "Copy the default config.json from the repo."
         )
 
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -205,11 +233,21 @@ def load_layout(path: Path | None = None) -> Layout:
                 "Either add it to 'games' or pick a game that is included."
             )
 
-    # Output paths may be declared in the layout so a deployment needs no .env.
-    # Relative paths resolve against the layout file's directory (see helper).
-    base_dir = path.parent
-    output_json = _resolve_layout_path(data.get("output_json"), base_dir, "output_json")
-    output_csv = _resolve_layout_path(data.get("output_csv"), base_dir, "output_csv")
+    # Output location: `output_path` is the directory (a relative value resolves
+    # against the CWD; absolute/~ as-is; omitted => CWD), and output_json /
+    # output_csv are bare filenames within it (defaulting to results.json /
+    # results.csv). A stream's composed path is None — meaning "fall through to
+    # $RESULTS_* / built-in default" — only when the config declares no output
+    # settings for it at all. Declaring the config so a deployment needs no .env.
+    output_path_raw = data.get("output_path")
+    output_dir = _resolve_output_dir(output_path_raw)
+    json_name = _output_filename(data.get("output_json"), "output_json")
+    csv_name = _output_filename(data.get("output_csv"), "output_csv")
+    has_dir = output_path_raw is not None
+    base = output_dir or Path.cwd()
+    output_json = base / (json_name or "results.json") if (has_dir or json_name) else None
+    output_csv = base / (csv_name or "results.csv") if (has_dir or csv_name) else None
+    export_csv_on_run = bool(data.get("export_csv_on_run", False))
 
     return Layout(
         include_puzzle_numbers=include_numbers,
@@ -218,6 +256,7 @@ def load_layout(path: Path | None = None) -> Layout:
         anchor_game=anchor,
         output_json=output_json,
         output_csv=output_csv,
+        export_csv_on_run=export_csv_on_run,
         raw=data,
     )
 

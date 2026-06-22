@@ -172,7 +172,7 @@ def main() -> int:
     try:
         layout = load_layout()
     except Exception as exc:
-        logger.error(f"Could not read sheet layout: {exc}")
+        logger.error(f"Could not read config: {exc}")
         return 1
 
     # ── Check existing data ───────────────────────────────────────────────────
@@ -249,12 +249,13 @@ def main() -> int:
         logger.error(f"JSON write failed: {exc}")
         return 1
 
-    # ── Optional CSV export (opt-in) ───────────────────────────────────────────
-    # The JSON store is already safely written above; a CSV failure here is
-    # reported but does not undo that.
-    if args.export_csv or args.csv_output:
+    # ── Optional CSV export ────────────────────────────────────────────────────
+    # Triggered by --export-csv/--csv-output, or by "export_csv_on_run": true in
+    # config.json. The JSON store is already safely written above; a CSV failure
+    # here is reported but does not undo that.
+    if args.export_csv or args.csv_output or layout.export_csv_on_run:
         from export_csv import export_to_csv
-        # CSV path precedence: --csv-output flag > layout file > $RESULTS_CSV >
+        # CSV path precedence: --csv-output flag > config file > $RESULTS_CSV >
         # the JSON path with a .csv suffix.
         if args.csv_output:
             csv_path = Path(args.csv_output).expanduser()

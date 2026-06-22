@@ -2,7 +2,7 @@
 Export the JSON score store to a CSV file (stdlib only — no pandas).
 
 JSON is the primary store (see json_writer.py); CSV is a derived view. This
-script reads the JSON, lays out columns from sheet_layout.json, and writes a
+script reads the JSON, lays out columns from config.json, and writes a
 fresh, fully-aligned CSV every time. Because the CSV is regenerated rather than
 patched in place, there is no header-drift or column-alignment problem: the
 output always matches the current layout.
@@ -95,7 +95,7 @@ def main() -> int:
         layout = load_layout()
         layout_json, layout_csv = layout.output_json, layout.output_csv
     except Exception as exc:
-        logger.warning(f"Could not read sheet layout ({exc}); using env/defaults for paths.")
+        logger.warning(f"Could not read config ({exc}); using env/defaults for paths.")
         layout_json = layout_csv = None
 
     default_json = layout_json or DEFAULT_RESULTS_JSON or (Path.cwd() / "results.json")
