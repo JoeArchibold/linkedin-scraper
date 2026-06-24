@@ -156,7 +156,11 @@ swapped into place), so an interrupted run cannot corrupt the store.
 The `config.json` file contains settings that allow for customizing a number of
 behaviors within the script, including the anchor game (which should be whatever
 game you play first on a daily basis), the order in which games will be retrieved 
-and displayed in CSV output, and the locations of the output files.  
+and displayed in CSV output, and the locations of the output files.
+
+Note that the first time the script runs, the `config.json.sample` file will be copied
+to `config.json`.  If you wish to customize before running the script, make the edits there.
+This is to prevent future changes to the repo from overwriting your custom configuration.
 
 The following settings are available in this file:
 

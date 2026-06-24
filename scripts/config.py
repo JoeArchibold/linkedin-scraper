@@ -19,6 +19,11 @@ SCRIPTS_DIR = Path(__file__).parent
 # the output paths, and related options. Parsed by sheet_layout.py.
 CONFIG_FILE = SCRIPTS_DIR / "config.json"
 
+# Tracked template for CONFIG_FILE. config.json itself is git-ignored and
+# user-local; this sample ships with the repo and is copied to CONFIG_FILE on
+# first run when none exists yet (see sheet_layout.load_layout).
+SAMPLE_CONFIG_FILE = SCRIPTS_DIR / "config.json.sample"
+
 
 # ── Output ─────────────────────────────────────────────────────────────────────
 

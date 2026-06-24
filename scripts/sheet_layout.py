@@ -33,11 +33,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from config import GAMES, CONFIG_FILE
+from config import GAMES, CONFIG_FILE, SAMPLE_CONFIG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +175,23 @@ def load_layout(path: Path | None = None) -> Layout:
     """Load and validate the config file. Falls back to CONFIG_FILE."""
     path = Path(path) if path else CONFIG_FILE
     if not path.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {path}\n"
-            "Copy the default config.json from the repo."
-        )
+        # First-run convenience: seed the default config from the shipped
+        # sample. config.json is git-ignored (user-local), so this never
+        # clobbers customisations and repo updates can't overwrite it. Only the
+        # default location is auto-created — an explicit, missing `path`
+        # argument is a caller error we surface rather than paper over.
+        if path == CONFIG_FILE and SAMPLE_CONFIG_FILE.exists():
+            shutil.copyfile(SAMPLE_CONFIG_FILE, path)
+            logger.info(
+                "No config.json found - created one from %s. Edit it to choose "
+                "which games are collected, the anchor game, and output paths.",
+                SAMPLE_CONFIG_FILE.name,
+            )
+        else:
+            raise FileNotFoundError(
+                f"Config file not found: {path}\n"
+                f"Copy {SAMPLE_CONFIG_FILE.name} to config.json and edit it."
+            )
 
     data = json.loads(path.read_text(encoding="utf-8"))
     include_numbers = bool(data.get("include_puzzle_numbers", False))

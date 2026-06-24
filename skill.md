@@ -25,9 +25,11 @@ the run command below.
 
 ## Configuring the collector
 
-Behavior is controlled by `scripts/config.json`. If the user hasn't set one up,
-help them tailor it. The script runs with the shipped defaults if left as-is,
-but offer to adjust these fields to their preferences:
+Behavior is controlled by `scripts/config.json`. This file is created
+automatically from `scripts/config.json.sample` on the first run if it doesn't
+exist yet, and it is git-ignored (user-local), so edits persist and repo updates
+won't overwrite it. The script runs with the shipped defaults if left as-is, but
+offer to help the user tailor these fields to their preferences:
 
 - `games` — the list of game keys to collect, in CSV column order. Reorder to
   taste, or omit games to exclude them. Valid keys: `zip`, `tango`, `queens`,
