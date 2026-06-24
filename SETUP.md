@@ -60,7 +60,7 @@ The collector creates or uses these local values:
 | Location | Purpose |
 |----------|---------|
 | `scripts/.env` | Optional. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths, though setting `output_path` in `config.json` is the preferred method (see "Output Location"). Create from `scripts/.env.example` if you want the env-based fallback. |
-| `scripts/config.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. |
+| `scripts/config.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. Derived from config.json.sample on first run. |
 | `<user data dir>/linkedin_state.enc` | Fernet-encrypted Playwright storage state for LinkedIn. |
 | `<user data dir>/passphrase.salt` | Created only if the passphrase fallback is used. |
 | OS credential store: `linkedin-games-data-collector` / `fernet-master-key` | Fernet key that decrypts the `.enc` file. |
@@ -162,34 +162,35 @@ Note that the first time the script runs, the `config.json.sample` file will be 
 to `config.json`.  If you wish to customize before running the script, make the edits there.
 This is to prevent future changes to the repo from overwriting your custom configuration.
 
-The following settings are available in this file:
+The following settings are available in this file. This is a template/reference,
+not a literal copy-paste config:
 
 ```jsonc
 {
-  "include_day_of_week": true,       // include/ exclude the Day of Week column
-  "include_puzzle_numbers": false,   // include/exclude a "<Game> #" column per game
-  "anchor_game": "zip",              // the game you typically play first;
-                                     // its results page is loaded first when
-                                     // nothing is recorded yet today, since
-                                     // it's the most likely to be complete.
-                                     // Omit/null for current behavior (the
-                                     // first game in 'games' is used).
-  "output_path": "~/linkedin-games", // directory the outputs are written to.
-                                     // Absolute or ~ recommended. A relative
-                                     // value resolves against the directory you
-                                     // run from; omit to default to that CWD.
-  "output_json": "results.json",     // JSON store filename within output_path
-                                     // (bare filename). Default results.json.
-  "output_csv": "results.csv",       // exported-CSV filename within output_path
-                                     // (bare filename). Default results.csv.
-  "export_csv_on_run": false,        // optional: when true, regenerate the CSV
-                                     // automatically after every collection run,
-                                     // as if --export-csv were always passed.
-                                     // Default false. (No effect on --dry-run or
-                                     // when no new scores were written.)
-  "games": [                         //Specify the order in which games will be collected.
-    "zip",                           // can be reordered to your preferences
-    "tango",                         // or you can omit one or more games to exclude them
+  "include_day_of_week": <true|false>,    // include/ exclude the Day of Week column
+  "include_puzzle_numbers": <true|false>, // include/exclude a "<Game> #" column per game
+  "anchor_game": "zip",                   // the game you typically play first;
+                                          // its results page is loaded first when
+                                          // nothing is recorded yet today, since
+                                          // it's the most likely to be complete.
+                                          // Omit/null for current behavior (the
+                                          // first game in 'games' is used).
+  "output_path": "~/linkedin-games",      // directory the outputs are written to.
+                                          // Absolute or ~ recommended. A relative
+                                          // value resolves against the directory you
+                                          // run from; omit to default to that CWD.
+  "output_json": "results.json",          // JSON store filename within output_path
+                                          // (bare filename). Default results.json.
+  "output_csv": "results.csv",            // exported-CSV filename within output_path
+                                          // (bare filename). Default results.csv.
+  "export_csv_on_run": <true|false>,      // optional: when true, regenerate the CSV
+                                          // automatically after every collection run,
+                                          // as if --export-csv were always passed.
+                                          // No effect on --dry-run or when no new
+                                          // scores were written.
+  "games": [                              //Specify the order in which games will be collected.
+    "zip",                                // can be reordered to your preferences
+    "tango",                              // or you can omit one or more games to exclude them
     "queens",
     "patches",
     "mini_sudoku",
@@ -212,7 +213,7 @@ the JSON store itself is keyed by game id and is unaffected by column order.
 The exported CSV column order is always:
 
 ```
-Date, [Day of Week,] <game columns in JSON order>
+Date, [Day of Week,] <game columns in the order specified in config.json>
 ```
 
 Per game, columns are `[<Game> #,] <Game> Time-or-Guesses, <Game> Avg`.
@@ -482,4 +483,3 @@ The average solve time for each puzzle is a moving target, and will almost inevi
 This means that results collected early in the day will frequently have lower average times than results later in the day, often by
 as much as 20 seconds.  Keep this in mind when setting up automated jobs to collect results, and remember that the `--update` parameter
 can be used to update averages even if you have collected the results earlier in the day.
-
