@@ -1,12 +1,59 @@
 ---
-name: linkedin-games
+name: linkedin-games-data-collector
 description: A skill to collect daily LinkedIn Games scores into a local JSON store (with optional CSV export).
 ---
+
+## First-time setup
+
+Before the first run, make sure dependencies are installed. **Set up a Python
+virtual environment unless the user explicitly asks not to** — create a `.venv`
+inside `scripts/`, install `requirements.txt` into it, and install the Playwright
+Chromium browser. Then invoke `collector.py` with that venv's interpreter (e.g.
+`scripts/.venv/Scripts/python` on Windows, `scripts/.venv/bin/python` on
+macOS/Linux) rather than a bare `python`, so collection runs use the same
+environment the dependencies were installed into. The full step-by-step
+instructions (including the `playwright install chromium` step and platform
+notes) are in `SETUP.md`.
+
+The collector also requires a one-time interactive LinkedIn login via
+`setup_auth.py`, which opens a visible browser for the user to log in. This step
+cannot be automated — if no saved session exists yet, direct the user to run it
+(see `SETUP.md`, "One-Time LinkedIn Login").
+
+If dependencies are already installed and a session is saved, skip straight to
+the run command below.
+
+## Configuring the collector
+
+Behavior is controlled by `scripts/config.json`. If the user hasn't set one up,
+help them tailor it. The script runs with the shipped defaults if left as-is,
+but offer to adjust these fields to their preferences:
+
+- `games` — the list of game keys to collect, in CSV column order. Reorder to
+  taste, or omit games to exclude them. Valid keys: `zip`, `tango`, `queens`,
+  `patches`, `mini_sudoku`, `crossclimb`, `wend`, `pinpoint`.
+- `anchor_game` — used for played/unplayed detection; must be one of the keys
+  present in `games`. Recommend the user set this to whichever game they play
+  first each day, since its results page is the most likely to be complete on a
+  fresh day. Note that `pinpoint` is a timer-safe option (it has no timer, so
+  loading it can never start a timer on an unplayed game).
+- `output_path` — directory the JSON store (and exported CSV) are written to.
+  Recommend an absolute or `~`-based path so output location is fixed regardless
+  of where the script is run from. `output_json` / `output_csv` are the bare
+  filenames within it.
+- `include_day_of_week` / `include_puzzle_numbers` — toggle those columns.
+- `export_csv_on_run` — set `true` to regenerate the CSV automatically after
+  every collection run.
+
+See `SETUP.md` ("Settings in config.json" and "Output Location")
+for the full annotated example and field reference.
+
+## Running
 
 Run the following command to fetch today's LinkedIn Games scores and record them in the configured JSON store with concise output:
 
 ```
-cd ~/.claude/skills/Linkedin-games/scripts && python collector.py --summary-only
+cd ~/.claude/skills/linkedin-games-data-collector/scripts && python collector.py --summary-only
 ```
 
 The script uses the LinkedIn/Pacific date because LinkedIn Games reset at midnight Pacific time.
@@ -31,7 +78,7 @@ The script reads played/unplayed state from a completed **anchor** game's result
 | `--show-status` | Include a Status column in the printed results table |
 | `--summary-only` | Suppress informational logs and print only the results table plus errors |
 | `--timezone <TZ>` | Override local timezone detection for the midnight/Pacific-date warning, e.g. `--timezone America/New_York` |
-| `--output <FILE>` | Override the JSON store path. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` in `.env` (deprecated) > `./results.json` |
+| `--output <FILE>` | Override the JSON store path. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` in `.env` (fallback) > `./results.json` |
 | `--export-csv` | After writing the store, also regenerate the CSV view (same as `"export_csv_on_run": true` in `config.json`) |
 | `--csv-output <FILE>` | Path for the exported CSV; implies `--export-csv` |
 
@@ -46,10 +93,10 @@ derived view. Produce it in any of three ways:
 
 ```
 # Standalone, from an already-collected store
-cd ~/.claude/skills/Linkedin-games/scripts && python export_csv.py
+cd ~/.claude/skills/linkedin-games-data-collector/scripts && python export_csv.py
 
 # As part of a collection run
-cd ~/.claude/skills/Linkedin-games/scripts && python collector.py --export-csv
+cd ~/.claude/skills/linkedin-games-data-collector/scripts && python collector.py --export-csv
 ```
 
 Or set `"export_csv_on_run": true` in `config.json` to regenerate the CSV after
@@ -65,13 +112,13 @@ it always matches the current layout). See `SETUP.md` for details.
 If the script reports errors or missing scores, re-run with `--debug` to inspect what Playwright is retrieving:
 
 ```
-cd ~/.claude/skills/Linkedin-games/scripts && python collector.py --debug
+cd ~/.claude/skills/linkedin-games-data-collector/scripts && python collector.py --debug
 ```
 
 If the LinkedIn session has expired, re-run the auth setup:
 
 ```
-cd ~/.claude/skills/Linkedin-games/scripts && python setup_auth.py
+cd ~/.claude/skills/linkedin-games-data-collector/scripts && python setup_auth.py
 ```
 
 To clear a saved session, run `python setup_auth.py --delete` (keeps the Fernet
@@ -79,4 +126,4 @@ key) or `--delete-key` (full local wipe). Note: deleting locally does **not**
 revoke a compromised token — that must be done on LinkedIn (sign out the device
 or change your password). See `SETUP.md` for the full security note.
 
-The LinkedIn session state is encrypted with Fernet and stored in the user's per-OS data directory (`%LOCALAPPDATA%\linkedin-games\` on Windows). The Fernet master key lives in the OS credential store via `keyring`. Which games to collect, in what order, whether to log puzzle numbers and the day of week, and which game to use as the anchor for played/unplayed detection is controlled by `scripts/config.json`. The collector writes a JSON store at `./results.json` by default; override with `output_path` in `config.json`, `RESULTS_JSON` in `scripts/.env` (deprecated), or `--output`. Generate a CSV from that store with `export_csv.py`, or set `"export_csv_on_run": true` in `config.json` to regenerate it after every run. See `SETUP.md` for details.
+The LinkedIn session state is encrypted with Fernet and stored in the user's per-OS data directory (`%LOCALAPPDATA%\linkedin-games\` on Windows). The Fernet master key lives in the OS credential store via `keyring`. Which games to collect, in what order, whether to log puzzle numbers and the day of week, and which game to use as the anchor for played/unplayed detection is controlled by `scripts/config.json`. The collector writes a JSON store at `./results.json` by default; override with `output_path` in `config.json` (preferred), `RESULTS_JSON` in `scripts/.env`, or `--output`. Generate a CSV from that store with `export_csv.py`, or set `"export_csv_on_run": true` in `config.json` to regenerate it after every run. See `SETUP.md` for details.
