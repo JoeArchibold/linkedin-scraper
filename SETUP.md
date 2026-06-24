@@ -60,7 +60,7 @@ Once your feed or home page has loaded, return to the terminal and press
 Enter. The script encrypts your session state (cookies + localStorage) with
 Fernet and writes it to the per-OS data directory described below.
 
-After this, `main.py` runs fully headless.
+After this, `collector.py` runs fully headless.
 
 ## Local Auth State
 
@@ -68,7 +68,7 @@ The collector creates or uses these local values:
 
 | Location | Purpose |
 |----------|---------|
-| `scripts/.env` | Optional and **deprecated**. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths. Prefer `output_path` in `config.json` instead (see "Output Location"). Create from `scripts/.env.example` if you still need it. |
+| `scripts/.env` | Optional. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths, though setting `output_path` in `config.json` is the preferred method (see "Output Location"). Create from `scripts/.env.example` if you want the env-based fallback. |
 | `scripts/config.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. |
 | `<user data dir>/linkedin_state.enc` | Fernet-encrypted Playwright storage state for LinkedIn. |
 | `<user data dir>/passphrase.salt` | Created only if the passphrase fallback is used. |
@@ -125,17 +125,17 @@ The full resolution order for each path is:
 |---|---|---|
 | 1. CLI flag | `--output` (full path) | `--csv-output` (full path) |
 | 2. Config file | `output_path` + `output_json` | `output_path` + `output_csv` |
-| 3. `.env` *(deprecated)* | `RESULTS_JSON` | `RESULTS_CSV` |
+| 3. `.env` *(fallback)* | `RESULTS_JSON` | `RESULTS_CSV` |
 | 4. Built-in default | `./results.json` (CWD) | JSON path with a `.csv` suffix |
 
-> **Deprecated:** `scripts/.env` (`RESULTS_JSON` / `RESULTS_CSV`) still works as a
-> lower-precedence fallback, but is deprecated in favour of `output_path` in the
-> config file. New setups should not need `.env` at all.
+> **Note:** `scripts/.env` (`RESULTS_JSON` / `RESULTS_CSV`) works as a
+> lower-precedence fallback, but setting `output_path` in the config file is the
+> preferred method. New setups should not need `.env` at all.
 >
 > Both `.env` paths and a relative `output_path` resolve against the **current
 > working directory**; prefer an absolute `output_path` so the location is fixed.
 
-> **Note:** `main.py` writes the JSON store directly; CSV is always a derived
+> **Note:** `collector.py` writes the JSON store directly; CSV is always a derived
 > view, produced on demand from the JSON either with `export_csv.py` or by adding
 > `--export-csv` to a collection run (see "Exporting to CSV").
 
@@ -226,14 +226,14 @@ layout.
 After setting up authentication, the following command can be used to verify that the script is functioning correctly
 
 ```
-python main.py --dry-run --summary-only
+python collector.py --dry-run --summary-only
 ```
 
 This authenticates, fetches today's scores, prints the result table, and
 exits without writing the store. Confirm scores look right, then run for real:
 
 ```
-python main.py
+python collector.py
 ```
 
 ## Exporting to CSV
@@ -242,7 +242,7 @@ CSV is always a derived view of the JSON store. You can produce it three ways:
 
 ```
 # As part of a collection run — collect, then regenerate the CSV
-python main.py --export-csv
+python collector.py --export-csv
 
 # Standalone, from an already-collected store
 python export_csv.py
@@ -259,11 +259,11 @@ collected). The destination follows the same precedence as below.
 
 Behavior and notes:
 
-- Both `main.py --export-csv` and `export_csv.py` resolve the CSV destination
+- Both `collector.py --export-csv` and `export_csv.py` resolve the CSV destination
   the same way: `--csv-output`/`--output` flag, then the config's
-  `output_path`/`output_csv`, then `$RESULTS_CSV` *(deprecated)*, then the JSON
+  `output_path`/`output_csv`, then `$RESULTS_CSV` *(fallback)*, then the JSON
   path with a `.csv` suffix. The JSON store path that `export_csv.py` reads
-  follows the same precedence as `main.py` (see "Output Location").
+  follows the same precedence as `collector.py` (see "Output Location").
 - Columns and their order come from `scripts/config.json`, so the CSV
   always reflects the current layout. The file is **regenerated in full** on
   each run — it is never edited in place — which avoids header drift and
@@ -280,7 +280,7 @@ Behavior and notes:
 
 ## Command-Line Parameters
 
-`main.py` accepts the following flags. They can be combined freely (e.g.
+`collector.py` accepts the following flags. They can be combined freely (e.g.
 `--update --dry-run` for a full fetch + preview with no write).
 
 | Flag | Behavior |
@@ -292,33 +292,33 @@ Behavior and notes:
 | `--show-status` | Add a Status column to the printed results table indicating, per game, whether the score was newly fetched, already present, skipped, or errored. Does not affect stored contents. |
 | `--summary-only` | Suppress informational log lines and print only the results table plus errors. Recommended when invoking from a Claude skill or any other context where compact output matters. |
 | `--timezone <TZ>` | Override local-timezone auto-detection used for the "are you running near midnight Pacific?" warning. Accepts any IANA timezone name, e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`. Does **not** change the LinkedIn/Pacific date used for the stored entry. |
-| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` *(deprecated)* > `./results.json`. A relative `--output` resolves against the CWD. |
-| `--export-csv` | After writing the JSON store, also regenerate the CSV view. Destination precedence: `--csv-output` > `output_path`/`output_csv` in `config.json` > `$RESULTS_CSV` *(deprecated)* > the JSON path with a `.csv` suffix. A CSV failure is reported but does not undo the JSON write. |
+| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` *(fallback)* > `./results.json`. A relative `--output` resolves against the CWD. |
+| `--export-csv` | After writing the JSON store, also regenerate the CSV view. Destination precedence: `--csv-output` > `output_path`/`output_csv` in `config.json` > `$RESULTS_CSV` *(fallback)* > the JSON path with a `.csv` suffix. A CSV failure is reported but does not undo the JSON write. |
 | `--csv-output <FILE>` | Path for the exported CSV. Implies `--export-csv`. Overrides the config's `output_path`/`output_csv` and `$RESULTS_CSV` for this run. |
 
 ### Common invocations
 
 ```bash
 # Normal daily run — smart mode, full logs
-python main.py
+python collector.py
 
 # Compact output (recommended for skill / automation use)
-python main.py --summary-only
+python collector.py --summary-only
 
 # Re-fetch everything (e.g. after LinkedIn corrected a score)
-python main.py --update
+python collector.py --update
 
 # Preview a config change without writing
-python main.py --dry-run --show-status
+python collector.py --dry-run --show-status
 
 # Diagnose a missing or wrong score
-python main.py --debug
+python collector.py --debug
 
 # Write to a one-off location
-python main.py --output ~/Desktop/today.json
+python collector.py --output ~/Desktop/today.json
 
 # Collect and refresh the CSV view in one run
-python main.py --export-csv
+python collector.py --export-csv
 
 # Export an already-collected store to CSV
 python export_csv.py --input ~/Desktop/today.json --output ~/Desktop/today.csv
@@ -336,8 +336,9 @@ python setup_auth.py
 If the script raises an `AuthStoreError` about being unable to decrypt
 `linkedin_state.enc`, the Fernet master key in the OS credential store has
 been removed or replaced (for example after restoring a profile from backup,
-or after running on a different machine). Delete the file from the user data
-directory and re-run `setup_auth.py` to regenerate it.
+or after running on a different machine). Run `python setup_auth.py --delete`
+to remove the stale file (see "Deleting or rotating your saved session" below),
+then re-run `setup_auth.py` to regenerate it.
 
 On headless Linux / WSL / Docker / CI, no keyring backend is typically
 available. Generate a Fernet key once and export it before running the
@@ -351,6 +352,38 @@ export LINKEDIN_GAMES_MASTER_KEY=<paste-key-here>
 The same key must be reused across runs. If `$LINKEDIN_GAMES_MASTER_KEY` is
 unset and no keyring is available, the script falls back to an interactive
 passphrase prompt with PBKDF2; that mode is not suitable for unattended runs.
+
+### Deleting or rotating your saved session
+
+```
+python setup_auth.py --delete       # delete the saved session (keeps the Fernet key)
+python setup_auth.py --delete-key   # full local wipe: session + Fernet key + salt
+```
+
+- `--delete` removes the encrypted `linkedin_state.enc` only. The Fernet master
+  key stays in your OS credential store, so re-running `setup_auth.py` reuses it.
+- `--delete-key` additionally removes the Fernet key (keyring entry) and the
+  `passphrase.salt`, for a full local wipe — e.g. when retiring a machine. It
+  cannot unset `$LINKEDIN_GAMES_MASTER_KEY`; if you use that env var, unset it
+  separately.
+
+**To rotate the Fernet key**, wipe and re-authenticate — the new login is
+encrypted under a freshly generated key:
+
+```
+python setup_auth.py --delete-key
+python setup_auth.py
+```
+
+> **⚠️ Security incident — deleting locally does NOT invalidate the token.**
+> The saved session contains your LinkedIn `li_at` cookie, a **bearer token**
+> that LinkedIn's servers honor regardless of whether your local copy still
+> exists. If the token may have been **compromised or copied**, deleting the
+> `.enc` (or the key) only removes *your* copy — an attacker's copy keeps working
+> until the session is revoked **server-side**. Revoke it on LinkedIn **first**:
+> **Settings & Privacy → Sign in & security → "Where you're signed in"** → sign
+> out the device, **or change your password** (which ends active sessions). Only
+> after revoking should you `--delete` locally and re-authenticate.
 
 ## Limitations / Known Issues
 

@@ -163,3 +163,47 @@ def get_linkedin_state() -> dict[str, Any] | None:
 def save_linkedin_state(state: dict[str, Any]) -> None:
     """Encrypt and save Playwright storage state."""
     _write_encrypted(LINKEDIN_STATE_PATH, json.dumps(state))
+
+
+def delete_linkedin_state() -> bool:
+    """
+    Delete the encrypted LinkedIn session file.
+
+    Returns True if a file was removed, False if there was nothing to delete.
+    The Fernet master key in the OS credential store is left intact, so a later
+    setup_auth.py run reuses it to encrypt the next session.
+    """
+    if LINKEDIN_STATE_PATH.exists():
+        LINKEDIN_STATE_PATH.unlink()
+        return True
+    return False
+
+
+def delete_master_key() -> dict[str, bool]:
+    """
+    Remove local Fernet key material: the OS keyring entry and the passphrase
+    salt file (if present).
+
+    Returns {"keyring": bool, "salt": bool} indicating what was actually removed.
+    Does NOT (and cannot) unset $LINKEDIN_GAMES_MASTER_KEY in your environment —
+    that takes precedence over the keyring, so unset it separately for a full
+    rotation. After removing the key the encrypted session can no longer be
+    decrypted, so callers should delete it too (see delete_linkedin_state); a
+    later setup_auth.py run generates a fresh key.
+    """
+    removed = {"keyring": False, "salt": False}
+    try:
+        import keyring
+        from keyring.errors import KeyringError, NoKeyringError
+        try:
+            if keyring.get_password(SERVICE_NAME, MASTER_KEY_ENTRY) is not None:
+                keyring.delete_password(SERVICE_NAME, MASTER_KEY_ENTRY)
+                removed["keyring"] = True
+        except (NoKeyringError, KeyringError):
+            pass
+    except ImportError:
+        pass
+    if SALT_PATH.exists():
+        SALT_PATH.unlink()
+        removed["salt"] = True
+    return removed

@@ -2,14 +2,14 @@
 LinkedIn Games daily score collector (writes a local JSON store).
 
 Usage:
-    python main.py              # smart mode: skip games already recorded today
-    python main.py --update     # fetch all games and refresh scores + averages
-    python main.py --dry-run    # print what would be written without touching the store
-    python main.py --debug      # save a screenshot + HTML dump for every page visited
-    python main.py --summary-only  # print only the results table plus errors
-    python main.py --timezone America/Chicago  # override auto-detected local timezone
-    python main.py --output path/to/scores.json # write to a specific JSON store
-    python main.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
+    python collector.py              # smart mode: skip games already recorded today
+    python collector.py --update     # fetch all games and refresh scores + averages
+    python collector.py --dry-run    # print what would be written without touching the store
+    python collector.py --debug      # save a screenshot + HTML dump for every page visited
+    python collector.py --summary-only  # print only the results table plus errors
+    python collector.py --timezone America/Chicago  # override auto-detected local timezone
+    python collector.py --output path/to/scores.json # write to a specific JSON store
+    python collector.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
 
 The CSV is a derived view, regenerated from the JSON each time. Use --export-csv to
 refresh it as part of a collection run, or run export_csv.py standalone.
