@@ -7,9 +7,10 @@ debug/
 # Backup folder
 backup/
 
-# Any stray credential/token files in the root scripts dir
+# Stray credential/token files plus the user's local config.json, which is
+# seeded from config.json.sample on first run. The tracked template is
+# config.json.sample (it does not match *.json, so it stays version-controlled).
 *.json
-!sheet_layout.json
 *.token
 *.key
 *.pem

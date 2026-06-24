@@ -2,12 +2,12 @@
 JSON writer for LinkedIn Games scores.
 
 Exposes get_json_today_state / write_json (the read-state and upsert entry
-points main.py calls) and stores results in a structured JSON file. JSON is the
+points collector.py calls) and stores results in a structured JSON file. JSON is the
 primary, schema-flexible store; a CSV can be exported from it on demand with
 export_csv.py.
 
 Unlike the CSV writer, there is no positional header row to keep in sync with
-sheet_layout.json: each daily record stores games keyed by their stable
+config.json: each daily record stores games keyed by their stable
 `game_key`, so adding a game to the layout simply makes new keys appear in
 future records. Records are keyed by ISO date (YYYY-MM-DD), which sorts
 chronologically.

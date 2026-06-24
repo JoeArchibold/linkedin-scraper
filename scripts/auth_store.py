@@ -43,14 +43,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 LINKEDIN_STATE_PATH = DATA_DIR / "linkedin_state.enc"
 SALT_PATH = DATA_DIR / "passphrase.salt"
 
-# Logical identifier kept for backwards-compatibility with callers that still
-# pass it to import_json_file_if_missing().
-LINKEDIN_STATE_KEY = "linkedin_state"
-
-_TARGETS = {
-    LINKEDIN_STATE_KEY: LINKEDIN_STATE_PATH,
-}
-
 
 class AuthStoreError(RuntimeError):
     """Raised when the encrypted store cannot be read or written."""
@@ -173,15 +165,45 @@ def save_linkedin_state(state: dict[str, Any]) -> None:
     _write_encrypted(LINKEDIN_STATE_PATH, json.dumps(state))
 
 
-def import_json_file_if_missing(key: str, path: Path) -> bool:
+def delete_linkedin_state() -> bool:
     """
-    Migrate a legacy plaintext JSON auth file into the encrypted store if no
-    encrypted copy exists yet. Returns True when a migration was performed.
+    Delete the encrypted LinkedIn session file.
+
+    Returns True if a file was removed, False if there was nothing to delete.
+    The Fernet master key in the OS credential store is left intact, so a later
+    setup_auth.py run reuses it to encrypt the next session.
     """
-    dest = _TARGETS.get(key)
-    if dest is None:
-        raise AuthStoreError(f"Unknown auth target: {key!r}")
-    if dest.exists() or not path.exists():
-        return False
-    _write_encrypted(dest, path.read_text(encoding="utf-8"))
-    return True
+    if LINKEDIN_STATE_PATH.exists():
+        LINKEDIN_STATE_PATH.unlink()
+        return True
+    return False
+
+
+def delete_master_key() -> dict[str, bool]:
+    """
+    Remove local Fernet key material: the OS keyring entry and the passphrase
+    salt file (if present).
+
+    Returns {"keyring": bool, "salt": bool} indicating what was actually removed.
+    Does NOT (and cannot) unset $LINKEDIN_GAMES_MASTER_KEY in your environment —
+    that takes precedence over the keyring, so unset it separately for a full
+    rotation. After removing the key the encrypted session can no longer be
+    decrypted, so callers should delete it too (see delete_linkedin_state); a
+    later setup_auth.py run generates a fresh key.
+    """
+    removed = {"keyring": False, "salt": False}
+    try:
+        import keyring
+        from keyring.errors import KeyringError, NoKeyringError
+        try:
+            if keyring.get_password(SERVICE_NAME, MASTER_KEY_ENTRY) is not None:
+                keyring.delete_password(SERVICE_NAME, MASTER_KEY_ENTRY)
+                removed["keyring"] = True
+        except (NoKeyringError, KeyringError):
+            pass
+    except ImportError:
+        pass
+    if SALT_PATH.exists():
+        SALT_PATH.unlink()
+        removed["salt"] = True
+    return removed

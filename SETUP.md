@@ -1,29 +1,20 @@
-# Setup
-
-This is the local-storage build of the LinkedIn Games score collector. The
-script logs into LinkedIn once interactively, then runs headless to collect
-daily game scores into a local JSON store. No Google account required. A
-spreadsheet-friendly CSV can be exported from the store on demand with
-`export_csv.py` (see "Exporting to CSV" below).
-
-The only persistent secret is your LinkedIn session state, which is encrypted
-at rest. See "Local Auth State" below.
-
-## Installation Location
-
+# Setup Guide
 You can clone or copy this project anywhere on disk and run the script from
 any working directory. The commands below assume you are inside the project's
 `scripts/` folder; adjust paths as needed.
 
 **To use this project as a Claude Code skill**, the project root must be
-placed at `~/.claude/skills/Linkedin-games/` (so the script lives at
-`~/.claude/skills/Linkedin-games/scripts/`). On Windows, `~` expands to
+placed at `~/.claude/skills/linkedin-games-data-collector/` (so the script lives at
+`~/.claude/skills/linkedin-games-data-collector/scripts/`). On Windows, `~` expands to
 `%USERPROFILE%` (typically `C:\Users\<you>\.claude\skills\Linkedin-games\`).
 For ad-hoc / non-skill use, any location works.
 
-## Python Dependencies
+Python 3.10 or newer is required. Using a Python virtual environment (VENV) is recommended.
+During development of the script, Python 3.14.2 was used.
 
-Python 3.10 or newer is required. Using a virtual environment is recommended.
+## Setting up dependencies
+
+The following commands can be used to set up the virtual environment, and install depdencies:
 
 ### Windows (PowerShell)
 
@@ -60,7 +51,7 @@ Once your feed or home page has loaded, return to the terminal and press
 Enter. The script encrypts your session state (cookies + localStorage) with
 Fernet and writes it to the per-OS data directory described below.
 
-After this, `main.py` runs fully headless.
+After this, `collector.py` runs fully headless.
 
 ## Local Auth State
 
@@ -68,11 +59,11 @@ The collector creates or uses these local values:
 
 | Location | Purpose |
 |----------|---------|
-| `scripts/.env` | Optional. Currently only used to set `RESULTS_JSON`. Create from `scripts/.env.example`. |
-| `scripts/sheet_layout.json` | Column layout. Controls which games are collected, in what order, and whether to log puzzle numbers and the day of week. |
+| `scripts/.env` | Optional. Can set `RESULTS_JSON` / `RESULTS_CSV` output paths, though setting `output_path` in `config.json` is the preferred method (see "Output Location"). Create from `scripts/.env.example` if you want the env-based fallback. |
+| `scripts/config.json` | Column layout and output paths. Controls which games are collected, in what order, whether to log puzzle numbers and the day of week, and (optionally) where the JSON store and exported CSV are written. Derived from config.json.sample on first run. |
 | `<user data dir>/linkedin_state.enc` | Fernet-encrypted Playwright storage state for LinkedIn. |
 | `<user data dir>/passphrase.salt` | Created only if the passphrase fallback is used. |
-| OS credential store: `linkedin-games-data-collector` / `fernet-master-key` | 44-byte Fernet key that decrypts the `.enc` file. |
+| OS credential store: `linkedin-games-data-collector` / `fernet-master-key` | Fernet key that decrypts the `.enc` file. |
 
 `<user data dir>` resolves per OS via `platformdirs`:
 
@@ -96,23 +87,48 @@ The master Fernet key is resolved on every run in this order:
 
 ## Output Location
 
-By default `main.py` writes a JSON store, `results.json`, to whatever directory
-you ran it from. To pin a fixed location, set `RESULTS_JSON` in `scripts/.env`:
+**Set an explicit `output_path` in `scripts/config.json`.** This is the single
+most important thing to configure: it pins where your data lives so it never
+depends on which directory a run happens to start in (which matters a lot for
+scheduled jobs). Outputs are a directory (`output_path`) plus two filenames:
 
-```text
-# Windows
-RESULTS_JSON=C:\Users\<you>\Documents\linkedin-games\results.json
-
-# macOS / Linux
-RESULTS_JSON=/Users/<you>/Documents/linkedin-games/results.json
+```jsonc
+{
+  "output_path": "C:/Users/<you>/Documents/linkedin-games",
+  "output_json": "results.json",   // optional, default results.json
+  "output_csv":  "results.csv",    // optional, default results.csv
+  "games": [ /* ... */ ]
+}
 ```
 
-Relative paths resolve against the current working directory. The CLI flag
-`--output FILE` overrides both `.env` and the default for one-off runs.
+- `output_path` is the directory the JSON store and exported CSV are written to.
+  **An absolute path (or one starting with `~`) is strongly recommended.** A
+  *relative* `output_path` resolves against the current working directory, and
+  if you omit it entirely the directory defaults to that CWD — fine for ad-hoc
+  runs, risky for scheduled ones, which is why an explicit path is preferred.
+- `output_json` / `output_csv` are **bare filenames** within `output_path` (no
+  directory part — a value containing a path separator is rejected). They
+  default to `results.json` / `results.csv`.
 
-> **Note:** `main.py` writes JSON only. The older `RESULTS_CSV` setting and
-> direct-to-CSV writing have been removed; produce a CSV from the JSON store
-> with `export_csv.py` (see "Exporting to CSV").
+The full resolution order for each path is:
+
+| | JSON store | CSV view |
+|---|---|---|
+| 1. CLI flag | `--output` (full path) | `--csv-output` (full path) |
+| 2. Config file | `output_path` + `output_json` | `output_path` + `output_csv` |
+| 3. `.env` *(fallback)* | `RESULTS_JSON` | `RESULTS_CSV` |
+| 4. Built-in default | `./results.json` (CWD) | JSON path with a `.csv` suffix |
+
+> **Note:** `scripts/.env` (`RESULTS_JSON` / `RESULTS_CSV`) works as a
+> lower-precedence fallback, but setting `output_path` in the config file is the
+> preferred method. New setups should not need `.env` at all.
+>
+> Both `.env` paths and a relative `output_path` resolve against the **current
+> working directory**; prefer an absolute `output_path` so the location is fixed.
+
+> **Note:** `collector.py` writes the JSON store directly; CSV is always a derived
+> view, produced on demand from the JSON either with `export_csv.py` or by adding
+> `--export-csv` to a collection run (see "Exporting to CSV").
 
 ### JSON store format
 
@@ -136,23 +152,45 @@ game needs no migration — new ids simply appear in future entries, and games n
 longer in the layout are preserved untouched. Writes are atomic (a temp file is
 swapped into place), so an interrupted run cannot corrupt the store.
 
-## Customising Which Games Are Collected
+## Settings in config.json
+The `config.json` file contains settings that allow for customizing a number of
+behaviors within the script, including the anchor game (which should be whatever
+game you play first on a daily basis), the order in which games will be retrieved 
+and displayed in CSV output, and the locations of the output files.
 
-Edit `scripts/sheet_layout.json`:
+Note that the first time the script runs, the `config.json.sample` file will be copied
+to `config.json`.  If you wish to customize before running the script, make the edits there.
+This is to prevent future changes to the repo from overwriting your custom configuration.
+
+The following settings are available in this file. This is a template/reference,
+not a literal copy-paste config:
 
 ```jsonc
 {
-  "include_day_of_week": true,       // include/ exclude the Day of Week column
-  "include_puzzle_numbers": false,   // include/exclude a "<Game> #" column per game
-  "anchor_game": "zip",              // the game you typically play first;
-                                     // its results page is loaded first when
-                                     // nothing is recorded yet today, since
-                                     // it's the most likely to be complete.
-                                     // Omit/null for current behavior (the
-                                     // first game in 'games' is used).
-  "games": [                         // order = exported CSV column order; these
-    "zip",                           // can be reordered to your preferences
-    "tango",                         // or you can omit one or more games to exclude them
+  "include_day_of_week": <true|false>,    // include/ exclude the Day of Week column
+  "include_puzzle_numbers": <true|false>, // include/exclude a "<Game> #" column per game
+  "anchor_game": "zip",                   // the game you typically play first;
+                                          // its results page is loaded first when
+                                          // nothing is recorded yet today, since
+                                          // it's the most likely to be complete.
+                                          // Omit/null for current behavior (the
+                                          // first game in 'games' is used).
+  "output_path": "~/linkedin-games",      // directory the outputs are written to.
+                                          // Absolute or ~ recommended. A relative
+                                          // value resolves against the directory you
+                                          // run from; omit to default to that CWD.
+  "output_json": "results.json",          // JSON store filename within output_path
+                                          // (bare filename). Default results.json.
+  "output_csv": "results.csv",            // exported-CSV filename within output_path
+                                          // (bare filename). Default results.csv.
+  "export_csv_on_run": <true|false>,      // optional: when true, regenerate the CSV
+                                          // automatically after every collection run,
+                                          // as if --export-csv were always passed.
+                                          // No effect on --dry-run or when no new
+                                          // scores were written.
+  "games": [                              //Specify the order in which games will be collected.
+    "zip",                                // can be reordered to your preferences
+    "tango",                              // or you can omit one or more games to exclude them
     "queens",
     "patches",
     "mini_sudoku",
@@ -165,55 +203,66 @@ Edit `scripts/sheet_layout.json`:
 
 Valid game keys: `zip`, `tango`, `queens`, `patches`, `mini_sudoku`,
 `crossclimb`, `wend`, `pinpoint`. `anchor_game` must be one of the keys present
-in `games`; otherwise startup fails with a clear error.
+in `games`; otherwise startup fails with a clear error. A game listed more than
+once in `games` is collected only once — the duplicate is ignored and a warning
+is logged so you can remove it.
 
-The layout controls the **exported CSV** (see "Exporting to CSV"); the JSON
-store itself is keyed by game id and is unaffected by column order. Exported CSV
-column order is always:
+The layout controls the **exported CSV** (see "Exporting to CSV") and the order 
+in which game data will be collected and displayed on the script's summary table;
+the JSON store itself is keyed by game id and is unaffected by column order. 
+The exported CSV column order is always:
 
 ```
-Date, [Day of Week,] <game columns in JSON order>
+Date, [Day of Week,] <game columns in the order specified in config.json>
 ```
 
 Per game, columns are `[<Game> #,] <Game> Time-or-Guesses, <Game> Avg`.
 
 You can change the layout at any time after results have been collected — the
 JSON store needs no migration, since it stores games by id rather than by fixed
-columns. The next `export_csv.py` run simply regenerates the CSV against the new
+columns. The next CSV export run simply regenerates the CSV against the new
 layout.
 
 ## First Run Check
 After setting up authentication, the following command can be used to verify that the script is functioning correctly
 
 ```
-python main.py --dry-run --summary-only
+python collector.py --dry-run --summary-only
 ```
 
 This authenticates, fetches today's scores, prints the result table, and
 exits without writing the store. Confirm scores look right, then run for real:
 
 ```
-python main.py
+python collector.py
 ```
 
 ## Exporting to CSV
 
-`main.py` writes the JSON store only. To produce a spreadsheet-friendly CSV from
-it, use `export_csv.py`:
+The CSV file will be generated from the data in JSON store on demand. You can produce it three ways:
 
 ```
-# Default: read the configured JSON store, write a CSV beside it
+# As part of a collection run — collect, then regenerate the CSV
+python collector.py --export-csv
+
+# Standalone, from an already-collected store
 python export_csv.py
 
-# Explicit input/output
+# Standalone with explicit input/output
 python export_csv.py --input results.json --output scores.csv
 ```
 
+To regenerate the CSV on **every** run without passing `--export-csv`, set
+`"export_csv_on_run": true` in `config.json`.
+
 Behavior and notes:
 
-- The default input is `$RESULTS_JSON` (else `./results.json`); the default
-  output is the input path with a `.csv` extension.
-- Columns and their order come from `scripts/sheet_layout.json`, so the CSV
+- Both `collector.py --export-csv` and `export_csv.py` resolve the CSV destination
+  the same way: `--csv-output`/`--output` flag, then the config's
+  `output_path`/`output_csv`, then `$RESULTS_CSV` *(fallback)*, then the JSON
+  path with a `.csv` suffix. The JSON store path that `export_csv.py` reads
+  follows the same precedence as `collector.py` (see "Output Location").
+- Columns and their order come from `scripts/config.json`, so the CSV
   always reflects the current layout. The file is **regenerated in full** on
   each run — it is never edited in place — which avoids header drift and
   column-misalignment problems.
@@ -224,12 +273,12 @@ Behavior and notes:
 
 | Flag | Behavior |
 |------|----------|
-| `--input <FILE>` | JSON store to read. Defaults to `$RESULTS_JSON`, else `./results.json`. |
-| `--output <FILE>` | CSV to write. Defaults to the input path with a `.csv` suffix. |
+| `--input <FILE>` | JSON store to read. Defaults to the config's `output_path`/`output_json`, then `$RESULTS_JSON`, then `./results.json`. |
+| `--output <FILE>` | CSV to write. Defaults to the config's `output_path`/`output_csv`, then `$RESULTS_CSV`, then the input path with a `.csv` suffix. |
 
 ## Command-Line Parameters
 
-`main.py` accepts the following flags. They can be combined freely (e.g.
+`collector.py` accepts the following flags. They can be combined freely (e.g.
 `--update --dry-run` for a full fetch + preview with no write).
 
 | Flag | Behavior |
@@ -240,31 +289,36 @@ Behavior and notes:
 | `--debug` | Save a PNG screenshot and an HTML dump for every page Playwright visits, under `scripts/debug/<timestamp>/`. Use when scores come back wrong or missing to inspect what LinkedIn actually returned. Output is **not** auto-pruned. |
 | `--show-status` | Add a Status column to the printed results table indicating, per game, whether the score was newly fetched, already present, skipped, or errored. Does not affect stored contents. |
 | `--summary-only` | Suppress informational log lines and print only the results table plus errors. Recommended when invoking from a Claude skill or any other context where compact output matters. |
-| `--timezone <TZ>` | Override local-timezone auto-detection used for the "are you running near midnight Pacific?" warning. Accepts any IANA timezone name, e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`. Does **not** change the LinkedIn/Pacific date used for the stored entry. |
-| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `$RESULTS_JSON` in `scripts/.env` > `./results.json` in the current working directory. Relative paths resolve against the CWD. |
+| `--timezone <TZ>` | Override local-timezone auto-detection used for the "are you running near Midnight Pacific?" warning. Accepts any IANA timezone name, e.g. `America/New_York`, `Europe/London`, `Asia/Tokyo`. Does **not** change the LinkedIn/Pacific date used for the stored entry. |
+| `--output <FILE>` | Override the JSON store path for this run. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` *(fallback)* > `./results.json`. A relative `--output` resolves against the CWD. |
+| `--export-csv` | After writing the JSON store, also regenerate the CSV view. Destination precedence: `--csv-output` > `output_path`/`output_csv` in `config.json` > `$RESULTS_CSV` *(fallback)* > the JSON path with a `.csv` suffix. A CSV failure is reported but does not undo the JSON write. |
+| `--csv-output <FILE>` | Path for the exported CSV. Implies `--export-csv`. Overrides the config's `output_path`/`output_csv` and `$RESULTS_CSV` for this run. |
 
 ### Common invocations
 
 ```bash
 # Normal daily run — smart mode, full logs
-python main.py
+python collector.py
 
 # Compact output (recommended for skill / automation use)
-python main.py --summary-only
+python collector.py --summary-only
 
 # Re-fetch everything (e.g. after LinkedIn corrected a score)
-python main.py --update
+python collector.py --update
 
 # Preview a config change without writing
-python main.py --dry-run --show-status
+python collector.py --dry-run --show-status
 
 # Diagnose a missing or wrong score
-python main.py --debug
+python collector.py --debug
 
 # Write to a one-off location
-python main.py --output ~/Desktop/today.json
+python collector.py --output ~/Desktop/today.json
 
-# Export the collected store to CSV
+# Collect and refresh the CSV view in one run
+python collector.py --export-csv
+
+# Export an already-collected store to CSV
 python export_csv.py --input ~/Desktop/today.json --output ~/Desktop/today.csv
 ```
 
@@ -280,8 +334,9 @@ python setup_auth.py
 If the script raises an `AuthStoreError` about being unable to decrypt
 `linkedin_state.enc`, the Fernet master key in the OS credential store has
 been removed or replaced (for example after restoring a profile from backup,
-or after running on a different machine). Delete the file from the user data
-directory and re-run `setup_auth.py` to regenerate it.
+or after running on a different machine). Run `python setup_auth.py --delete`
+to remove the stale file (see "Deleting or rotating your saved session" below),
+then re-run `setup_auth.py` to regenerate it.
 
 On headless Linux / WSL / Docker / CI, no keyring backend is typically
 available. Generate a Fernet key once and export it before running the
@@ -296,41 +351,135 @@ The same key must be reused across runs. If `$LINKEDIN_GAMES_MASTER_KEY` is
 unset and no keyring is available, the script falls back to an interactive
 passphrase prompt with PBKDF2; that mode is not suitable for unattended runs.
 
-## Limitations / Known Issues
+### Deleting or rotating your saved session
 
-**Anchor Games**
-Currently, the script needs to open the results page for a game which has been completed
-in order to determine which games have and have not been played yet for the day.  The script 
-defaults to using Zip for this (the value is configurable in the `sheet_layout.json` file), 
-because that is the game I generally play first, and I can typically guarantee that it
-will be played by the time the script runs.  
-  
-Be aware that if the script runs before that game is played,
-it can leave the timer running in the unplayed game and affect your solve times.  If I can determine a way
-to get played/unplayed states of the games without opening a results page I will implement it, but so far
-I have not been able to find another reliable way to get this information (`https:\\linkedin.com\games` shows 
-static icons with different played/unplayed states, but does not provide any usable DOM elements to determine the state from,
-and asset file URLs are likely to be too brittle to be a reliable indicator.)  Pinpoint has no timer, and can be used as a check that
-will not affect solve times, but tends to be less played than the other games, so it may be less reliable.
+```
+python setup_auth.py --delete       # delete the saved session (keeps the Fernet key)
+python setup_auth.py --delete-key   # full local wipe: session + Fernet key + salt
+```
 
-**Adding or reordering games**
-The JSON store is keyed by game id, so reordering games in `sheet_layout.json`,
-or removing one, takes effect immediately with no migration — existing entries
-are left untouched and the exported CSV simply regenerates in the new order.
-Adding a brand-new LinkedIn game still requires a small code change: add an entry
-to `GAMES` in `config.py` (id, display name, results URL, and whether it is
-timed) and include its id in `sheet_layout.json`. Note that on a new game's first
-day LinkedIn may not report a daily average yet, so the average can be briefly
-blank.
+- `--delete` removes the encrypted `linkedin_state.enc` only. The Fernet master
+  key stays in your OS credential store, so re-running `setup_auth.py` reuses it.
+- `--delete-key` additionally removes the Fernet key (keyring entry) and the
+  `passphrase.salt`, for a full local wipe — e.g. when retiring a machine. It
+  cannot unset `$LINKEDIN_GAMES_MASTER_KEY`; if you use that env var, unset it
+  separately.
 
-**Notes on Time Zones**
+**To rotate the Fernet key**, wipe and re-authenticate — the new login is
+encrypted under a freshly generated key:
+
+```
+python setup_auth.py --delete-key
+python setup_auth.py
+```
+
+> **IMPORTANT NOTE: deleting locally does NOT invalidate the token.**
+> The saved session contains your LinkedIn `li_at` cookie, a **bearer token**
+> that LinkedIn's servers honor regardless of whether your local copy still
+> exists. If the token may have been **compromised or copied**, deleting the
+> `.enc` (or the key) only removes *your* copy — an attacker's copy keeps working
+> until the session is revoked **server-side**. Revoke it on LinkedIn **first**:
+> **Settings & Privacy → Sign in & security → "Where you're signed in"** → sign
+> out the device, **or change your password** (which ends active sessions). Only
+> after revoking should you `--delete` locally and re-authenticate.
+
+
+## Syncing a CSV output file to Google Sheets
+
+The easiest way to sync the data from the collector to Google Sheets is to use
+ its built-in `=IMPORTDATA` command to download the CSV file from an Internet 
+ accessible location.  One way to do this is to save the CSV file to a local folder
+ on your machine which syncs to a Google Drive.  Once you have located the file in 
+ Google Drive, open its sharing settings, set its permissions to "Anyone with the 
+ link can view," then copy the link.  You will get a link in this format:
+
+```
+https://drive.google.com/file/d/<documentID>/view?usp=sharing
+```
+
+This link will include a document ID, but Google Sheets is expecting a link in 
+a slightly different format.  Take the `documentID` value from the first URL, and 
+paste it into the following URL:
+
+```
+https://drive.google.com/uc?export=download&id=<documentID>
+```
+
+To test this, open the URL.  If this results in the file being downloaded, it is set up
+correctly.  From there, you can go into a Google Sheet, and in cell A1, add the following formula:
+
+```
+=IMPORTDATA("https://drive.google.com/uc?export=download&id=<documentID>")
+```
+
+Assuming the permissions are set up correctly, your data should appear in the spreadsheet, 
+and whenever the CSV file gets updated the changes will automatically propagate to the Google 
+Spreadsheet (keep in mind there may be some amount of lag between when the file gets 
+updated and when the sheet picks up the update.)
+
+**A couple of items to note about importing to Google Sheets:**
+
+* Google Sheets does not seem to handle M:SS values properly, so I generally 
+have to format time values in H:MM format to get the values to look correct.  
+Generally this should work fine, but if a puzzle takes ever an hour or more
+to solve this will result in inaccurate values being displayed.  If you can
+find a better way to handle the number formatting for these values, let me 
+know.  Then again, if a puzzle ever takes an hour to finish you're likely 
+not having a great day and you should probably just call in sick.
+
+* If you make changes to your games layout which might impact the way items
+on the sheet are displayed, the cleanest way to "reset" the sheet is to 
+temporarily delete the `=IMPORTDATA` statement from cell A1, then add it
+back to refresh all the data.  Note that any existing formatting will
+remain in place, so additional tweaking may be needed to get things back in order.  
+
+
+# Limitations and  Known Issues
+
+## The "Anchor Game", explained
+The "anchor game" specified in the configuration should ideally be the one you play
+first each day, or at least one you can be certain will be played by the time the 
+script runs (which in my case happens to be Zip.)  I have found that currently, 
+the only reliable way to determine the played/unplayed status of all of the games is to 
+open the results page for a game which has already been completed for the day.
+
+This is important because an attempt to open the results page for an unplayed game
+will automatically redirect to the game page, which may cause the game timer to 
+start running.  The script is designed to detect the redirect and fail out with an error
+if the anchor game is detected to be unplayed, but this can still affect the timer.
+
+Pinpoint is currently the only game on LinkedIn that does not use a timer, 
+and can be used as a timer-safe option for the anchor if you play it regularly.
+
+*Why not read state from the games hub instead?* 
+It does appear that https://www.linkedin.com/games/ shows different icons 
+depending on each game's played/unplayed status, but through testing I have 
+determined that the only differences between the two statuses are static icon 
+assets, which are brittle and likely not a reliable indicator for this purpose.  
+
+## Adding a new game
+The master list of games is located in config.py, If a new game is added to LinkedIn, 
+it would need to be added there first, then added to the list of games config.json 
+in order to be tracked.  A sample is provided below:
+
+```python
+     {
+        "key":     "wend", # This should match the game's name string in the URL
+        "name":    "Wend", # The display name for the game
+        "url":     "https://www.linkedin.com/games/wend/results/",
+        "is_time": True, # This will be false for non-timer based games like Pinpoint
+    },
+```
+
+## Time Zones
 LinkedIn is based in the US Pacific Time Zone (PST/PDT), and the daily changeover of games happens at Midnight in that time zone.  The script
-accounts for this with a built-in time zone offset that collects results based on the current day in PST/PDT, but the --timezone parameter can be used
-to override this if desired.  
+accounts for this with a built-in time zone offset that collects results based on the current day in PST/PDT, but the `--timezone` parameter can be used
+to override the local time zone if there is a need for it.  This won't affect the actual collection of results (which will always be tied to US Pacific Time), 
+but if you run the script after Midnight in your local time zone but before Midnight PST/PDT it will warn you that results are still being 
+recorded for the previous day.
 
-**Daily Averages**
+## Daily Averages
 The average solve time for each puzzle is a moving target, and will almost inevitably trend higher over the course of any given day.  
 This means that results collected early in the day will frequently have lower average times than results later in the day, often by
 as much as 20 seconds.  Keep this in mind when setting up automated jobs to collect results, and remember that the `--update` parameter
 can be used to update averages even if you have collected the results earlier in the day.
-

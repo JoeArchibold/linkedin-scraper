@@ -2,14 +2,14 @@
 LinkedIn Games daily score collector (writes a local JSON store).
 
 Usage:
-    python main.py              # smart mode: skip games already recorded today
-    python main.py --update     # fetch all games and refresh scores + averages
-    python main.py --dry-run    # print what would be written without touching the store
-    python main.py --debug      # save a screenshot + HTML dump for every page visited
-    python main.py --summary-only  # print only the results table plus errors
-    python main.py --timezone America/Chicago  # override auto-detected local timezone
-    python main.py --output path/to/scores.json # write to a specific JSON store
-    python main.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
+    python collector.py              # smart mode: skip games already recorded today
+    python collector.py --update     # fetch all games and refresh scores + averages
+    python collector.py --dry-run    # print what would be written without touching the store
+    python collector.py --debug      # save a screenshot + HTML dump for every page visited
+    python collector.py --summary-only  # print only the results table plus errors
+    python collector.py --timezone America/Chicago  # override auto-detected local timezone
+    python collector.py --output path/to/scores.json # write to a specific JSON store
+    python collector.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
 
 The CSV is a derived view, regenerated from the JSON each time. Use --export-csv to
 refresh it as part of a collection run, or run export_csv.py standalone.
@@ -168,8 +168,21 @@ def main() -> int:
         if not args.summary_only:
             logging.getLogger().setLevel(logging.DEBUG)
 
+    # ── Load layout (drives columns, anchor, and output paths) ────────────────
+    try:
+        layout = load_layout()
+    except Exception as exc:
+        logger.error(f"Could not read config: {exc}")
+        return 1
+
     # ── Check existing data ───────────────────────────────────────────────────
-    output_path = Path(args.output).expanduser() if args.output else DEFAULT_OUTPUT_PATH
+    # Output path precedence: --output flag > layout file > $RESULTS_JSON/default.
+    if args.output:
+        output_path = Path(args.output).expanduser()
+    elif layout.output_json:
+        output_path = layout.output_json
+    else:
+        output_path = DEFAULT_OUTPUT_PATH
     logger.info(f"Output file: {output_path}")
     try:
         row_exists, missing_games = get_json_today_state(output_path, linkedin_date)
@@ -194,11 +207,7 @@ def main() -> int:
         logger.info(f"Fetching {len(missing_games)} game(s) with missing scores: {', '.join(missing_games)}")
 
     # ── Fetch ──────────────────────────────────────────────────────────────────
-    try:
-        anchor_name = load_layout().anchor_game_name()
-    except Exception as exc:
-        logger.warning(f"Could not read anchor_game from layout ({exc}); using default.")
-        anchor_name = None
+    anchor_name = layout.anchor_game_name()
 
     try:
         results = fetch_all_scores(
@@ -240,13 +249,18 @@ def main() -> int:
         logger.error(f"JSON write failed: {exc}")
         return 1
 
-    # ── Optional CSV export (opt-in) ───────────────────────────────────────────
-    # The JSON store is already safely written above; a CSV failure here is
-    # reported but does not undo that.
-    if args.export_csv or args.csv_output:
+    # ── Optional CSV export ────────────────────────────────────────────────────
+    # Triggered by --export-csv/--csv-output, or by "export_csv_on_run": true in
+    # config.json. The JSON store is already safely written above; a CSV failure
+    # here is reported but does not undo that.
+    if args.export_csv or args.csv_output or layout.export_csv_on_run:
         from export_csv import export_to_csv
+        # CSV path precedence: --csv-output flag > config file > $RESULTS_CSV >
+        # the JSON path with a .csv suffix.
         if args.csv_output:
             csv_path = Path(args.csv_output).expanduser()
+        elif layout.output_csv:
+            csv_path = layout.output_csv
         elif DEFAULT_RESULTS_CSV:
             csv_path = DEFAULT_RESULTS_CSV
         else:
