@@ -8,7 +8,9 @@ store.
 
 import re
 import logging
+import urllib.parse
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +18,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 from auth_store import get_linkedin_state
-from config import GAMES
+from config import GAMES, GAME_IDS
 from sheet_layout import load_layout
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,80 @@ class GameResult:
     number: Optional[str] = None  # puzzle number, e.g. "389"
     error: Optional[str] = None
     unplayed: bool = False  # True when the game hasn't been played yet today
+
+
+def _build_game_urn(viewer_member_id: str, game_key: str, puzzle_number_str: str) -> str:
+    game_id = GAME_IDS[game_key]
+    return f"urn:li:fsd_game:({viewer_member_id},{game_id},{int(puzzle_number_str)})"
+
+
+def _try_extract_viewer_member_id(html: str) -> Optional[str]:
+    """Search page HTML for a gameUrn and extract the viewerMemberId segment."""
+    m = re.search(r"urn:li:fsd_game:\(([^,)]+),", html)
+    return m.group(1) if m else None
+
+
+def _extrapolate_puzzle_number(
+    game_key: str,
+    target_date: date,
+    results_data: dict,
+) -> Optional[int]:
+    """
+    Compute today's puzzle number for game_key using linear extrapolation from
+    the most recent stored entry. Puzzle numbers are confirmed perfectly linear
+    (+1 per day). Returns None if no prior entry exists for this game.
+    """
+    best_date: Optional[date] = None
+    best_number: Optional[int] = None
+    for date_str, rec in results_data.items():
+        games = (rec or {}).get("games") or {}
+        entry = (games.get(game_key) or {})
+        num_str = entry.get("number")
+        if not num_str:
+            continue
+        try:
+            num = int(num_str)
+            d = date.fromisoformat(date_str)
+            if best_date is None or d > best_date:
+                best_date = d
+                best_number = num
+        except (ValueError, TypeError):
+            continue
+    if best_date is None or best_number is None:
+        return None
+    return best_number + (target_date - best_date).days
+
+
+def _check_played_leaderboard(
+    context: BrowserContext,
+    game_key: str,
+    puzzle_number: int,
+    viewer_member_id: str,
+    query_id: str,
+) -> Optional[bool]:
+    """
+    Call the connections-leaderboard Voyager API and return True (played),
+    False (unplayed), or None (API error / queryId stale). Timer-safe: does
+    not load any game board page.
+    """
+    game_urn = _build_game_urn(viewer_member_id, game_key, str(puzzle_number))
+    encoded_urn = urllib.parse.quote(game_urn, safe="")
+    url = (
+        "https://www.linkedin.com/voyager/api/graphql"
+        f"?variables=(gameUrn:{encoded_urn},start:0,count:1)"
+        f"&queryId=voyagerIdentityDashGameConnectionsEntities.{query_id}"
+    )
+    try:
+        resp = context.request.get(url, headers={"accept": "application/json", "x-li-lang": "en_US"})
+        if resp.status != 200:
+            logger.debug(f"Leaderboard API {resp.status} for {game_key}")
+            return None
+        data = resp.json()
+        total = ((data.get("paging") or {}).get("total") or 0)
+        return total > 0
+    except Exception as exc:
+        logger.debug(f"Leaderboard check failed for {game_key}: {exc}")
+        return None
 
 
 def _extract_from_html(html: str, game_name: str, is_time: bool) -> tuple[Optional[str], Optional[str]]:
@@ -110,12 +186,25 @@ def _get_unplayed_names(page: Page) -> set[str]:
     return unplayed
 
 
-def _fetch_game(page: Page, game: dict, debug_dir: Optional[Path] = None, already_loaded: bool = False) -> GameResult:
-    """Navigate to a single game results URL and extract score + avg."""
+def _fetch_game(
+    page: Page,
+    game: dict,
+    debug_dir: Optional[Path] = None,
+    already_loaded: bool = False,
+    game_urn: Optional[str] = None,
+) -> GameResult:
+    """Navigate to a single game results URL and extract score + avg.
+
+    When game_urn is provided, appends ?gameUrn=<urn> to load a past puzzle's
+    frozen results instead of today's live page.
+    """
     name    = game["name"]
     url     = game["url"]
     is_time = game["is_time"]
     slug    = name.lower().replace(" ", "_")
+
+    if game_urn:
+        url = url + "?gameUrn=" + urllib.parse.quote(game_urn, safe="")
 
     logger.info(f"Fetching {name} ...")
     try:
@@ -178,10 +267,144 @@ def _save_debug(page: Page, debug_dir: Path, slug: str, chiclets_found: bool) ->
     logger.info(f"  Debug files saved: {screenshot_path.name}, {html_path.name}")
 
 
+def fetch_final_averages(
+    target_games: dict,
+    viewer_member_id: str,
+    debug_dir: Optional[Path] = None,
+) -> list[GameResult]:
+    """
+    Load past results pages via ?gameUrn= to capture frozen post-deadline averages.
+
+    target_games: {game_key: {"number": "<puzzle_num>", ...}} from get_finalizable_games().
+    Returns GameResult list; only avg (and error) are meaningful — score/number
+    are not re-written by the caller.
+    """
+    linkedin_state = get_linkedin_state()
+    if linkedin_state is None:
+        raise FileNotFoundError(
+            "LinkedIn session not found. Run setup_auth.py first."
+        )
+
+    game_by_key = {g["key"]: g for g in GAMES}
+    results: list[GameResult] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            storage_state=linkedin_state,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
+        first_page = True
+
+        for game_key, entry in target_games.items():
+            game = game_by_key.get(game_key)
+            if not game:
+                logger.warning(f"fetch_final_averages: unknown game key {game_key!r}")
+                continue
+            number = entry.get("number")
+            if not number:
+                logger.warning(f"{game['name']}: no puzzle number stored — cannot build gameUrn")
+                results.append(GameResult(name=game["name"], score=None, avg=None, error="no puzzle number"))
+                continue
+
+            game_urn = _build_game_urn(viewer_member_id, game_key, number)
+            logger.info(f"Finalizing {game['name']} (puzzle #{number}) …")
+            result = _fetch_game(page, game, debug_dir=debug_dir, game_urn=game_urn)
+
+            # Try to extract viewerMemberId from the first page we load as a
+            # sanity-check / future-proof discovery path (result not used here).
+            if first_page and result.error is None:
+                first_page = False
+                vmid_check = _try_extract_viewer_member_id(page.content())
+                if vmid_check and vmid_check != viewer_member_id:
+                    logger.warning(
+                        f"viewer_member_id in config ({viewer_member_id[:8]}…) "
+                        f"differs from page ({vmid_check[:8]}…) — "
+                        "update viewer_member_id in config.json if gameUrns are wrong."
+                    )
+
+            results.append(result)
+
+        browser.close()
+
+    return results
+
+
+def discover_viewer_member_id() -> Optional[str]:
+    """
+    Open a short Playwright session to auto-discover the viewer's LinkedIn
+    member ID from any played game's results page HTML or network responses.
+
+    Returns the member ID string (e.g. 'ACoAAAEF5_EBCg...') or None if not found.
+    """
+    linkedin_state = get_linkedin_state()
+    if linkedin_state is None:
+        return None
+
+    try:
+        layout_games = load_layout().included_game_names()
+        game = next((g for g in GAMES if g["name"] in layout_games), GAMES[0])
+    except Exception:
+        game = GAMES[0]
+
+    found: list[str] = []
+
+    def _on_response(response):
+        if found:
+            return
+        if "voyager/api" not in response.url:
+            return
+        try:
+            body = response.text()
+            m = re.search(r"urn:li:fsd_game:\(([^,)]+),", body)
+            if m:
+                found.append(m.group(1))
+        except Exception:
+            pass
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            storage_state=linkedin_state,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
+        page.on("response", _on_response)
+        try:
+            page.goto(game["url"], wait_until="domcontentloaded", timeout=20_000)
+            if "/results/" in page.url:
+                page.wait_for_selector(".pr-golden-chiclet, .pr-top__headline", timeout=10_000)
+            # Also search static HTML
+            if not found:
+                m = re.search(r"urn:li:fsd_game:\(([^,)]+),", page.content())
+                if m:
+                    found.append(m.group(1))
+        except Exception as exc:
+            logger.debug(f"discover_viewer_member_id page load: {exc}")
+        finally:
+            browser.close()
+
+    return found[0] if found else None
+
+
 def fetch_all_scores(
     names: Optional[set[str]] = None,
     debug_dir: Optional[Path] = None,
     anchor_name: Optional[str] = None,
+    leaderboard_query_id: Optional[str] = None,
+    viewer_member_id: Optional[str] = None,
+    results_data: Optional[dict] = None,
 ) -> list[GameResult]:
     """
     Launch a headless Playwright browser, restore the saved LinkedIn session,
@@ -199,6 +422,19 @@ def fetch_all_scores(
                  when no already-recorded game is available. Typically the
                  game the user plays first each day, so its results page is
                  the most likely to be complete on a fresh day.
+
+    leaderboard_query_id: when non-empty, make a parallel played/unplayed check
+                          via the connections-leaderboard Voyager API for each
+                          game and log the comparison against the anchor result.
+                          Does not change any fetch decision — anchor method
+                          remains authoritative. Empty or None disables this.
+
+    viewer_member_id: LinkedIn member URN required for gameUrn construction when
+                      leaderboard_query_id is provided. Read from config.json.
+
+    results_data: full parsed results.json dict used to extrapolate today's
+                  puzzle numbers for gameUrn construction. Pass None to skip
+                  the leaderboard check even if query_id is set.
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
@@ -296,6 +532,35 @@ def fetch_all_scores(
                 fetched.get(g["name"], GameResult(name=g["name"], score=None, avg=None))
                 for g in layout_games
             ]
+
+        # ── Parallel leaderboard played/unplayed check (experimental) ────────
+        # Calls the connections-leaderboard Voyager API for each game we're
+        # about to fetch and logs the result alongside the anchor-based decision.
+        # Purely observational — does not change any fetch decision below.
+        if leaderboard_query_id and viewer_member_id and results_data is not None:
+            today = date.today()
+            for game in games_to_fetch:
+                game_key = game["key"]
+                puzzle_num = _extrapolate_puzzle_number(game_key, today, results_data)
+                if puzzle_num is None:
+                    logger.debug(f"{game['name']}: no prior puzzle number — leaderboard check skipped")
+                    continue
+                lb_played = _check_played_leaderboard(
+                    context, game_key, puzzle_num, viewer_member_id, leaderboard_query_id
+                )
+                anchor_says = "unplayed" if game["name"] in unplayed else "played"
+                if lb_played is None:
+                    lb_label = "unavailable"
+                    match_marker = ""
+                elif lb_played:
+                    lb_label = "played"
+                    match_marker = " ✓" if anchor_says == "played" else " *** MISMATCH ***"
+                else:
+                    lb_label = "unplayed"
+                    match_marker = " ✓" if anchor_says == "unplayed" else " *** MISMATCH ***"
+                logger.info(
+                    f"{game['name']}: anchor={anchor_says}, leaderboard={lb_label}{match_marker}"
+                )
 
         # ── Fetch each game that needs data and isn't known-unplayed ──────────
         # Process the anchor first while its results page (loaded above for the

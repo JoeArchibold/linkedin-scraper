@@ -10,15 +10,23 @@ Usage:
     python collector.py --timezone America/Chicago  # override auto-detected local timezone
     python collector.py --output path/to/scores.json # write to a specific JSON store
     python collector.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
+    python collector.py --finalize   # standalone: finalize yesterday's averages and exit
+    python collector.py --no-finalize  # skip auto-finalization of yesterday's averages
+
+Each normal run automatically finalizes yesterday's averages before collecting today:
+it loads yesterday's results pages via ?gameUrn= (which show the post-midnight frozen
+average) and updates avg + avg_is_final in the JSON store.  Requires viewer_member_id
+in config.json (auto-discovered on first finalization run).
 
 The CSV is a derived view, regenerated from the JSON each time. Use --export-csv to
 refresh it as part of a collection run, or run export_csv.py standalone.
 """
 
 import argparse
+import json
 import logging
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,10 +36,10 @@ try:
 except ImportError:
     _TZLOCAL_AVAILABLE = False
 
-from linkedin_scraper import fetch_all_scores, GameResult
-from json_writer import get_json_today_state, write_json
+from linkedin_scraper import fetch_all_scores, fetch_final_averages, discover_viewer_member_id, GameResult
+from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages, read_results_data
 from sheet_layout import load_layout
-from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR
+from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE
 
 # LinkedIn games reset at midnight Pacific time
 _LINKEDIN_TZ = ZoneInfo("America/Los_Angeles")
@@ -101,10 +109,26 @@ def _colorize(score: str, avg: str) -> str:
     return score
 
 
-def print_results(results: list[GameResult], show_status: bool = False) -> None:
+def print_results(
+    results: list[GameResult],
+    linkedin_date: date,
+    show_status: bool = False,
+    final: bool = False,
+) -> None:
     """Pretty-print results to the console."""
     print()
-    header = f"{'Game':<22} {'Score':<10} {'Today\'s Avg':<10}" + (" Status" if show_status else "")
+    day_label = linkedin_date.strftime("%A, %B %d %Y")
+    print(f"Results for {day_label} (LinkedIn/Pacific date)")
+    if final:
+        print(
+            "Averages for this day are now FINAL."
+        )
+    else:
+        print(
+            "Averages for this day are currently PROVISIONAL and subject to change as more players record scores."
+        )
+    avg_label = "Final Avg" if final else "Today's Avg"
+    header = f"{'Game':<22} {'Score':<10} {avg_label:<10}" + (" Status" if show_status else "")
     print(header)
     print("-" * len(header))
     for r in results:
@@ -120,13 +144,71 @@ def print_results(results: list[GameResult], show_status: bool = False) -> None:
             score_col = f"{'—':<10}"
         row = f"{name:<22} {score_col} {avg:<10}"
         if show_status:
-            status = f"ERROR: {r.error}" if r.error else ("ok" if r.score else "skipped")
-            row += status
+            row_status = f"ERROR: {r.error}" if r.error else ("ok" if r.score else "skipped")
+            row += row_status
         print(row)
     pacific_now = datetime.now(_LINKEDIN_TZ)
     print("-" * len(header))
     print(f"Updated at:{pacific_now.strftime('%I:%M %p %Z %A, %B %d %Y')}")
     print()
+
+
+def _save_viewer_member_id(vmid: str) -> None:
+    """Persist auto-discovered viewer_member_id into config.json."""
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        data["viewer_member_id"] = vmid
+        CONFIG_FILE.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        logger.info(f"Saved viewer_member_id to {CONFIG_FILE.name}")
+    except Exception as exc:
+        logger.warning(f"Could not save viewer_member_id to config: {exc}")
+
+
+def _run_finalizer(
+    target_date: date,
+    output_path: Path,
+    viewer_member_id: str,
+    debug_dir: Path | None,
+) -> bool:
+    """
+    Finalize averages for target_date. Returns True if any averages were written.
+
+    Loads yesterday's results pages via ?gameUrn= to capture the post-deadline
+    frozen average, then upserts into the JSON store with avg_is_final=True.
+    """
+    finalizable = get_finalizable_games(output_path, target_date)
+    if not finalizable:
+        logger.info(f"All averages already finalized for {target_date} (or no data).")
+        return False
+
+    logger.info(f"Finalizing {len(finalizable)} game(s) from {target_date} …")
+
+    try:
+        finals = fetch_final_averages(finalizable, viewer_member_id, debug_dir)
+    except FileNotFoundError as exc:
+        logger.error(str(exc))
+        return False
+    except Exception as exc:
+        logger.error(f"Finalization fetch failed: {exc}")
+        return False
+
+    finalized = [r for r in finals if r.avg is not None]
+    if not finalized:
+        logger.warning("No averages retrieved during finalization — store not updated.")
+        return False
+
+    try:
+        count = write_final_averages(finals, target_date, output_path)
+    except Exception as exc:
+        logger.error(f"Failed to write final averages: {exc}")
+        return False
+
+    print_results(finals, target_date, final=True)
+    logger.info(f"Finalization complete: {count} game(s) updated for {target_date}.")
+    return True
 
 
 def main() -> int:
@@ -150,7 +232,24 @@ def main() -> int:
     parser.add_argument("--csv-output",  metavar="FILE", default=None,
                         help="Path for the exported CSV. Implies --export-csv. Overrides "
                              f"$RESULTS_CSV (currently {DEFAULT_RESULTS_CSV}).")
+    parser.add_argument("--finalize",    action="store_true",
+                        help="Standalone mode: fetch frozen averages for yesterday's games "
+                             "and exit (skips today's collection). Use --finalize-date to "
+                             "target a specific date.")
+    parser.add_argument("--finalize-date", metavar="DATE", default=None,
+                        help="Target date for --finalize (YYYY-MM-DD). Defaults to yesterday "
+                             "in LinkedIn/Pacific time.")
+    parser.add_argument("--no-finalize", action="store_true",
+                        help="Skip the automatic finalization of yesterday's averages that "
+                             "runs at the start of each normal collection.")
     args = parser.parse_args()
+
+    if args.finalize and args.update:
+        logger.error("--finalize and --update are mutually exclusive.")
+        return 1
+    if args.finalize and args.dry_run:
+        logger.error("--finalize and --dry-run are mutually exclusive.")
+        return 1
 
     if args.summary_only:
         logging.getLogger().setLevel(logging.ERROR)
@@ -175,8 +274,8 @@ def main() -> int:
         logger.error(f"Could not read config: {exc}")
         return 1
 
-    # ── Check existing data ───────────────────────────────────────────────────
-    # Output path precedence: --output flag > layout file > $RESULTS_JSON/default.
+    # ── Resolve output path ───────────────────────────────────────────────────
+    # Precedence: --output flag > layout file > $RESULTS_JSON/default.
     if args.output:
         output_path = Path(args.output).expanduser()
     elif layout.output_json:
@@ -184,6 +283,68 @@ def main() -> int:
     else:
         output_path = DEFAULT_OUTPUT_PATH
     logger.info(f"Output file: {output_path}")
+
+    # ── Read existing store (shared by finalization + today's state check) ────
+    try:
+        results_data = read_results_data(output_path)
+    except Exception as exc:
+        logger.error(f"Could not read JSON store: {exc}")
+        return 1
+
+    # ── Resolve viewer_member_id (needed for finalization + leaderboard check) ─
+    viewer_member_id: str = (layout.raw.get("viewer_member_id") or "").strip()
+
+    # ── Finalization (standalone --finalize mode or auto at start of normal run) ─
+    yesterday = linkedin_date - timedelta(days=1)
+    _do_finalize = args.finalize or (not args.no_finalize and not args.update and not args.dry_run)
+    if args.dry_run and not args.no_finalize and not args.update:
+        logger.info("--dry-run: skipping auto-finalization of yesterday's averages.")
+
+    if _do_finalize:
+        fin_date = yesterday
+        if args.finalize and args.finalize_date:
+            try:
+                fin_date = date.fromisoformat(args.finalize_date)
+            except ValueError:
+                logger.error(f"Invalid --finalize-date: {args.finalize_date!r} (expected YYYY-MM-DD)")
+                return 1
+
+        # Check early whether there's anything to finalize before discovering vmid
+        finalizable_check = get_finalizable_games(output_path, fin_date)
+        if finalizable_check and not viewer_member_id:
+            logger.info("viewer_member_id not in config — attempting auto-discovery …")
+            viewer_member_id = discover_viewer_member_id() or ""
+            if viewer_member_id:
+                _save_viewer_member_id(viewer_member_id)
+            else:
+                msg = (
+                    "Could not auto-discover viewer_member_id. "
+                    "Add it to config.json to enable finalization. "
+                    "Find it in DevTools Network tab on a connections leaderboard page."
+                )
+                if args.finalize:
+                    logger.error(msg)
+                    return 1
+                logger.warning(msg)
+
+        if viewer_member_id:
+            did_finalize = _run_finalizer(fin_date, output_path, viewer_member_id, debug_dir)
+            if did_finalize and (args.export_csv or args.csv_output or layout.export_csv_on_run):
+                from export_csv import export_to_csv
+                csv_path = (
+                    Path(args.csv_output).expanduser() if args.csv_output
+                    else layout.output_csv or (DEFAULT_RESULTS_CSV or output_path.with_suffix(".csv"))
+                )
+                try:
+                    export_to_csv(output_path, csv_path)
+                except Exception as exc:
+                    logger.error(f"CSV export after finalization failed: {exc}")
+
+        if args.finalize:
+            logger.info("Done.")
+            return 0
+
+    # ── Check existing data ───────────────────────────────────────────────────
     try:
         row_exists, missing_games = get_json_today_state(output_path, linkedin_date)
     except Exception as exc:
@@ -209,17 +370,22 @@ def main() -> int:
     # ── Fetch ──────────────────────────────────────────────────────────────────
     anchor_name = layout.anchor_game_name()
 
+    leaderboard_query_id = (layout.raw.get("leaderboard_query_id") or "").strip() or None
+
     try:
         results = fetch_all_scores(
             names=names_to_fetch,
             debug_dir=debug_dir,
             anchor_name=anchor_name,
+            leaderboard_query_id=leaderboard_query_id,
+            viewer_member_id=viewer_member_id or None,
+            results_data=results_data,
         )
     except FileNotFoundError as exc:
         logger.error(str(exc))
         return 1
 
-    print_results(results, show_status=args.show_status)
+    print_results(results, linkedin_date, show_status=args.show_status)
 
     fetched  = [r for r in results if r.score is not None]
     unplayed = [r.name for r in results if r.score is None and r.error is None and r.unplayed]

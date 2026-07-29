@@ -9,6 +9,8 @@ scripts/results.csv
 
 # Local research scratch (games-hub state-signal experiment)
 scripts/research/
+CONNECTIONS.md
+mock/
 
 # Backups and caches
 backup/

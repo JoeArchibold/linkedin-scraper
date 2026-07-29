@@ -132,6 +132,72 @@ def _atomic_write(path: Path, data: dict) -> None:
         raise
 
 
+def read_results_data(path: Path) -> dict:
+    """Return the full parsed JSON store (or {} if absent/empty)."""
+    return _read_data(path)
+
+
+def get_finalizable_games(path: Path, target_date: date) -> dict:
+    """
+    Return {game_key: entry} for games on target_date that have a stored score
+    and puzzle number but have not yet been finalized (avg_is_final not True).
+    """
+    data = _read_data(path)
+    key = _date_key(target_date)
+    rec = data.get(key)
+    if not rec:
+        return {}
+    games = rec.get("games") or {}
+    finalizable: dict = {}
+    for game_key, entry in games.items():
+        if not entry:
+            continue
+        if entry.get("avg_is_final"):
+            continue
+        if entry.get("score") and entry.get("number"):
+            finalizable[game_key] = entry
+    return finalizable
+
+
+def write_final_averages(finals: list[GameResult], target_date: date, path: Path) -> int:
+    """
+    Upsert finalized averages into the JSON store for target_date.
+
+    Only writes avg and avg_is_final=True for games with a non-None avg.
+    Does not touch number, score, or any other existing field.
+    Returns the count of games successfully finalized.
+    """
+    layout = load_layout()
+    data = _read_data(path)
+    key = _date_key(target_date)
+    rec = data.get(key)
+    if not rec:
+        logger.warning(f"No entry for {key} in store — nothing to finalize.")
+        return 0
+
+    games = rec.get("games") or {}
+    name_to_key = {g["name"]: g["key"] for g in GAMES}
+    count = 0
+    for result in finals:
+        if result.avg is None:
+            continue
+        game_key = name_to_key.get(result.name)
+        if not game_key:
+            logger.warning(f"write_final_averages: unknown game name {result.name!r}")
+            continue
+        entry = games.get(game_key) or {}
+        entry["avg"] = result.avg
+        entry["avg_is_final"] = True
+        games[game_key] = entry
+        count += 1
+
+    rec["games"] = games
+    data[key] = rec
+    _atomic_write(path, _ordered_for_output(data, layout))
+    logger.info(f"Final averages written for {key} ({count} game(s)).")
+    return count
+
+
 def write_json(results: list[GameResult], today: date, path: Path) -> None:
     """
     Upsert today's scores and averages into the JSON store.

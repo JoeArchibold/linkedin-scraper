@@ -61,6 +61,19 @@ DEFAULT_RESULTS_CSV = _resolve_env_path("RESULTS_CSV")
 # `key` is the stable identifier used by config.json. `name` is the
 # human-readable display name used for log lines, scraper lookups, and as the
 # base for column headers.
+# Stable numeric game IDs used to construct Voyager API gameUrns.
+# Format: urn:li:fsd_game:(<viewerMemberId>,<gameId>,<puzzleNumber>)
+GAME_IDS: dict[str, int] = {
+    "pinpoint":    1,
+    "crossclimb":  2,
+    "queens":      3,
+    "wend":        4,
+    "tango":       5,
+    "zip":         6,
+    "mini_sudoku": 7,
+    "patches":     8,
+}
+
 GAMES = [
     {
         "key":     "zip",
