@@ -12,11 +12,17 @@ Usage:
     python collector.py --export-csv # also regenerate a CSV view ($RESULTS_CSV) after writing
     python collector.py --finalize   # standalone: finalize yesterday's averages and exit
     python collector.py --no-finalize  # skip auto-finalization of yesterday's averages
+    python collector.py --check-finalized       # audit last 30 days for unfinalized averages
+    python collector.py --check-finalized 45 --yes  # audit 45 days and finalize any gaps
 
 Each normal run automatically finalizes yesterday's averages before collecting today:
 it loads yesterday's results pages via ?gameUrn= (which show the post-midnight frozen
 average) and updates avg + avg_is_final in the JSON store.  Requires viewer_member_id
-in config.json (auto-discovered on first finalization run).
+in config.json.
+
+viewer_member_id and leaderboard_query_id are both auto-discovered from a played game's
+results page (no dev tools) and saved to config.json — seeded on first run and, for the
+rotating leaderboard_query_id, refreshed automatically whenever LinkedIn changes it.
 
 The CSV is a derived view, regenerated from the JSON each time. Use --export-csv to
 refresh it as part of a collection run, or run export_csv.py standalone.
@@ -36,7 +42,7 @@ try:
 except ImportError:
     _TZLOCAL_AVAILABLE = False
 
-from linkedin_scraper import fetch_all_scores, fetch_final_averages, discover_viewer_member_id, GameResult
+from linkedin_scraper import fetch_all_scores, fetch_final_averages, discover_voyager_ids, GameResult
 from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages, read_results_data
 from sheet_layout import load_layout
 from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE
@@ -153,18 +159,25 @@ def print_results(
     print()
 
 
-def _save_viewer_member_id(vmid: str) -> None:
-    """Persist auto-discovered viewer_member_id into config.json."""
+def _save_config_values(values: dict) -> None:
+    """
+    Persist auto-discovered values (e.g. viewer_member_id, leaderboard_query_id)
+    into config.json. Only writes keys whose value differs from what's stored,
+    so a no-op discovery leaves the file untouched.
+    """
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        data["viewer_member_id"] = vmid
+        changed = {k: v for k, v in values.items() if v and data.get(k) != v}
+        if not changed:
+            return
+        data.update(changed)
         CONFIG_FILE.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        logger.info(f"Saved viewer_member_id to {CONFIG_FILE.name}")
+        logger.info(f"Saved to {CONFIG_FILE.name}: {', '.join(sorted(changed))}")
     except Exception as exc:
-        logger.warning(f"Could not save viewer_member_id to config: {exc}")
+        logger.warning(f"Could not save values to config: {exc}")
 
 
 def _run_finalizer(
@@ -211,6 +224,111 @@ def _run_finalizer(
     return True
 
 
+def _resolve_csv_path(args, layout, output_path: Path) -> Path:
+    """CSV destination precedence: --csv-output > config file > $RESULTS_CSV > JSON path .csv."""
+    if args.csv_output:
+        return Path(args.csv_output).expanduser()
+    return layout.output_csv or (DEFAULT_RESULTS_CSV or output_path.with_suffix(".csv"))
+
+
+def _export_csv_if_requested(args, layout, output_path: Path) -> None:
+    """Regenerate the CSV view when --export-csv/--csv-output or export_csv_on_run is set."""
+    if not (args.export_csv or args.csv_output or layout.export_csv_on_run):
+        return
+    from export_csv import export_to_csv
+    try:
+        export_to_csv(output_path, _resolve_csv_path(args, layout, output_path))
+    except Exception as exc:
+        logger.error(f"CSV export failed: {exc}")
+
+
+def _scan_unfinalized(output_path: Path, end_date: date, days: int) -> list[tuple[date, int]]:
+    """
+    Return [(date, pending_game_count)] for days in the `days`-day window ending
+    at end_date (inclusive) that hold scored games not yet finalized — oldest
+    first. Days with no data (or already fully finalized) are omitted.
+    """
+    found: list[tuple[date, int]] = []
+    for offset in range(days - 1, -1, -1):
+        d = end_date - timedelta(days=offset)
+        pending = get_finalizable_games(output_path, d)
+        if pending:
+            found.append((d, len(pending)))
+    return found
+
+
+def _run_check_finalized(
+    args,
+    layout,
+    output_path: Path,
+    linkedin_date: date,
+    viewer_member_id: str,
+    debug_dir: Path | None,
+) -> int:
+    """
+    Audit the last N days for averages that were never finalized (e.g. days
+    collected with --update, which skips auto-finalization) and optionally go
+    back and finalize them. Standalone: does not collect today.
+    """
+    days = args.check_finalized
+    if days < 1:
+        logger.error(f"--check-finalized range must be >= 1 (got {days}).")
+        return 1
+
+    # Today's average hasn't frozen yet, so the newest finalizable day is yesterday.
+    end_date = linkedin_date - timedelta(days=1)
+    logger.info(f"Auditing finalized status for the {days} day(s) ending {end_date} …")
+
+    unfinalized = _scan_unfinalized(output_path, end_date, days)
+    if not unfinalized:
+        logger.info("All days in range are finalized. Nothing to do.")
+        return 0
+
+    print()
+    print(f"Unfinalized day(s) found ({len(unfinalized)}):")
+    for d, n in unfinalized:
+        print(f"  {d.isoformat()}   {n} game(s) pending")
+    print()
+
+    proceed = args.yes
+    if not proceed and sys.stdin.isatty():
+        try:
+            proceed = input(
+                f"Finalize these {len(unfinalized)} day(s) now? [y/N]: "
+            ).strip().lower() in ("y", "yes")
+        except EOFError:
+            proceed = False
+
+    if not proceed:
+        print("Not finalized. Re-run with --yes to finalize, or target days individually:")
+        for d, _ in unfinalized:
+            print(f"  python collector.py --finalize --finalize-date {d.isoformat()}")
+        return 0
+
+    # Finalization needs viewer_member_id to build gameUrns; discover if absent.
+    if not viewer_member_id:
+        logger.info("viewer_member_id not in config — attempting auto-discovery …")
+        discovered = discover_voyager_ids()
+        viewer_member_id = (discovered.get("viewer_member_id") or "").strip()
+        _save_config_values(discovered)
+        if not viewer_member_id:
+            logger.error(
+                "Could not auto-discover viewer_member_id (needs a game played today). "
+                "Add it to config.json to enable finalization."
+            )
+            return 1
+
+    finalized_any = False
+    for d, _ in unfinalized:
+        if _run_finalizer(d, output_path, viewer_member_id, debug_dir):
+            finalized_any = True
+
+    if finalized_any:
+        _export_csv_if_requested(args, layout, output_path)
+    logger.info("Finalization audit complete.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and record them in a local JSON store")
     parser.add_argument("--update",      action="store_true", help="Fetch all games and update scores + averages regardless of existing data")
@@ -242,6 +360,15 @@ def main() -> int:
     parser.add_argument("--no-finalize", action="store_true",
                         help="Skip the automatic finalization of yesterday's averages that "
                              "runs at the start of each normal collection.")
+    parser.add_argument("--check-finalized", nargs="?", type=int, const=30, default=None,
+                        metavar="DAYS",
+                        help="Standalone audit: scan the last DAYS days (default 30, ending "
+                             "yesterday) for days whose averages were never finalized — e.g. "
+                             "days collected with --update, which skips auto-finalization. "
+                             "Reports them and, if run interactively (or with --yes), finalizes "
+                             "them. Does not collect today.")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="Assume 'yes' to confirmation prompts (e.g. for --check-finalized).")
     args = parser.parse_args()
 
     if args.finalize and args.update:
@@ -249,6 +376,9 @@ def main() -> int:
         return 1
     if args.finalize and args.dry_run:
         logger.error("--finalize and --dry-run are mutually exclusive.")
+        return 1
+    if args.check_finalized is not None and (args.finalize or args.update or args.dry_run):
+        logger.error("--check-finalized cannot be combined with --finalize, --update, or --dry-run.")
         return 1
 
     if args.summary_only:
@@ -294,6 +424,12 @@ def main() -> int:
     # ── Resolve viewer_member_id (needed for finalization + leaderboard check) ─
     viewer_member_id: str = (layout.raw.get("viewer_member_id") or "").strip()
 
+    # ── Standalone finalized-status audit (--check-finalized) ─────────────────
+    if args.check_finalized is not None:
+        return _run_check_finalized(
+            args, layout, output_path, linkedin_date, viewer_member_id, debug_dir
+        )
+
     # ── Finalization (standalone --finalize mode or auto at start of normal run) ─
     yesterday = linkedin_date - timedelta(days=1)
     _do_finalize = args.finalize or (not args.no_finalize and not args.update and not args.dry_run)
@@ -313,14 +449,14 @@ def main() -> int:
         finalizable_check = get_finalizable_games(output_path, fin_date)
         if finalizable_check and not viewer_member_id:
             logger.info("viewer_member_id not in config — attempting auto-discovery …")
-            viewer_member_id = discover_viewer_member_id() or ""
-            if viewer_member_id:
-                _save_viewer_member_id(viewer_member_id)
-            else:
+            discovered = discover_voyager_ids()
+            viewer_member_id = (discovered.get("viewer_member_id") or "").strip()
+            # Seed both ids (member id + leaderboard queryId) while we're here.
+            _save_config_values(discovered)
+            if not viewer_member_id:
                 msg = (
-                    "Could not auto-discover viewer_member_id. "
-                    "Add it to config.json to enable finalization. "
-                    "Find it in DevTools Network tab on a connections leaderboard page."
+                    "Could not auto-discover viewer_member_id (needs a game played today). "
+                    "Add it to config.json to enable finalization."
                 )
                 if args.finalize:
                     logger.error(msg)
@@ -329,16 +465,8 @@ def main() -> int:
 
         if viewer_member_id:
             did_finalize = _run_finalizer(fin_date, output_path, viewer_member_id, debug_dir)
-            if did_finalize and (args.export_csv or args.csv_output or layout.export_csv_on_run):
-                from export_csv import export_to_csv
-                csv_path = (
-                    Path(args.csv_output).expanduser() if args.csv_output
-                    else layout.output_csv or (DEFAULT_RESULTS_CSV or output_path.with_suffix(".csv"))
-                )
-                try:
-                    export_to_csv(output_path, csv_path)
-                except Exception as exc:
-                    logger.error(f"CSV export after finalization failed: {exc}")
+            if did_finalize:
+                _export_csv_if_requested(args, layout, output_path)
 
         if args.finalize:
             logger.info("Done.")
@@ -372,6 +500,9 @@ def main() -> int:
 
     leaderboard_query_id = (layout.raw.get("leaderboard_query_id") or "").strip() or None
 
+    # fetch_all_scores fills this from the anchor page's own traffic; we persist
+    # anything new/changed afterward so config.json seeds and self-heals.
+    discovered_ids: dict = {}
     try:
         results = fetch_all_scores(
             names=names_to_fetch,
@@ -380,10 +511,13 @@ def main() -> int:
             leaderboard_query_id=leaderboard_query_id,
             viewer_member_id=viewer_member_id or None,
             results_data=results_data,
+            discovered=discovered_ids,
         )
     except FileNotFoundError as exc:
         logger.error(str(exc))
         return 1
+
+    _save_config_values(discovered_ids)
 
     print_results(results, linkedin_date, show_status=args.show_status)
 

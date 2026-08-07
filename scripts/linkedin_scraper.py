@@ -41,8 +41,71 @@ def _build_game_urn(viewer_member_id: str, game_key: str, puzzle_number_str: str
 
 def _try_extract_viewer_member_id(html: str) -> Optional[str]:
     """Search page HTML for a gameUrn and extract the viewerMemberId segment."""
-    m = re.search(r"urn:li:fsd_game:\(([^,)]+),", html)
+    m = _GAME_URN_MEMBER_RE.search(html)
     return m.group(1) if m else None
+
+
+# viewerMemberId is the first segment of a gameUrn: urn:li:fsd_game:(<member>,...).
+_GAME_URN_MEMBER_RE = re.compile(r"urn:li:fsd_game:\(([^,)]+),")
+# The connections-leaderboard queryId hash rides on the request URL as
+# queryId=voyagerIdentityDashGameConnectionsEntities.<hash>.
+_LEADERBOARD_QID_RE = re.compile(r"voyagerIdentityDashGameConnectionsEntities\.([0-9a-f]{16,})")
+
+
+class _VoyagerIdCapture:
+    """
+    Passive listener that harvests the viewer member id and the connections-
+    leaderboard queryId from a page's Voyager traffic. Attach with attach(page)
+    before navigating, then read .member_id / .query_id afterward.
+
+    Both values are stable identifiers LinkedIn embeds in its own web app, so
+    loading any played game's results page surfaces them with no dev tools —
+    the queryId in the leaderboard request URL, the member id in gameUrns.
+    """
+
+    def __init__(self) -> None:
+        self.member_id: Optional[str] = None
+        self.query_id: Optional[str] = None
+
+    def _scan_url(self, url: str) -> None:
+        decoded = urllib.parse.unquote(url)
+        if self.query_id is None:
+            m = _LEADERBOARD_QID_RE.search(decoded)
+            if m:
+                self.query_id = m.group(1)
+        if self.member_id is None:
+            m = _GAME_URN_MEMBER_RE.search(decoded)
+            if m:
+                self.member_id = m.group(1)
+
+    def _on_request(self, request) -> None:
+        try:
+            self._scan_url(request.url)
+        except Exception:
+            pass
+
+    def _on_response(self, response) -> None:
+        if self.member_id is not None:
+            return
+        try:
+            if "voyager/api" not in response.url:
+                return
+            m = _GAME_URN_MEMBER_RE.search(response.text())
+            if m:
+                self.member_id = m.group(1)
+        except Exception:
+            pass
+
+    def attach(self, page: Page) -> None:
+        page.on("request", self._on_request)
+        page.on("response", self._on_response)
+
+    def scan_html(self, html: str) -> None:
+        """Fallback: pull the member id out of static page HTML."""
+        if self.member_id is None:
+            m = _GAME_URN_MEMBER_RE.search(html)
+            if m:
+                self.member_id = m.group(1)
 
 
 def _extrapolate_puzzle_number(
@@ -76,33 +139,60 @@ def _extrapolate_puzzle_number(
     return best_number + (target_date - best_date).days
 
 
+def _voyager_csrf_token(context: BrowserContext) -> Optional[str]:
+    """
+    Return the CSRF token Voyager requires: the JSESSIONID cookie value with
+    its surrounding quotes stripped. Voyager GraphQL rejects requests without a
+    matching `csrf-token` header with 403 "CSRF check failed".
+    """
+    jsession = next((c["value"] for c in context.cookies() if c["name"] == "JSESSIONID"), None)
+    return jsession.strip('"') if jsession else None
+
+
 def _check_played_leaderboard(
     context: BrowserContext,
     game_key: str,
     puzzle_number: int,
     viewer_member_id: str,
     query_id: str,
+    csrf_token: Optional[str],
 ) -> Optional[bool]:
     """
     Call the connections-leaderboard Voyager API and return True (played),
     False (unplayed), or None (API error / queryId stale). Timer-safe: does
     not load any game board page.
+
+    The played signal is the viewer's own rank in the leaderboard snapshot
+    (metadata.memberRanking), which is null until the viewer plays. The
+    connections list (elements) is populated regardless, so it is NOT a
+    played signal.
     """
     game_urn = _build_game_urn(viewer_member_id, game_key, str(puzzle_number))
     encoded_urn = urllib.parse.quote(game_urn, safe="")
     url = (
         "https://www.linkedin.com/voyager/api/graphql"
-        f"?variables=(gameUrn:{encoded_urn},start:0,count:1)"
+        f"?variables=(gameUrn:{encoded_urn})"
         f"&queryId=voyagerIdentityDashGameConnectionsEntities.{query_id}"
     )
+    headers = {
+        "accept": "application/json",
+        "x-li-lang": "en_US",
+        "x-restli-protocol-version": "2.0.0",
+    }
+    if csrf_token:
+        headers["csrf-token"] = csrf_token
     try:
-        resp = context.request.get(url, headers={"accept": "application/json", "x-li-lang": "en_US"})
+        resp = context.request.get(url, headers=headers)
         if resp.status != 200:
             logger.debug(f"Leaderboard API {resp.status} for {game_key}")
             return None
         data = resp.json()
-        total = ((data.get("paging") or {}).get("total") or 0)
-        return total > 0
+        snapshot = (
+            (data.get("data") or {})
+            .get("identityDashGameConnectionsEntitiesByLeaderboardSnapshotV2")
+        ) or {}
+        metadata = snapshot.get("metadata") or {}
+        return metadata.get("memberRanking") is not None
     except Exception as exc:
         logger.debug(f"Leaderboard check failed for {game_key}: {exc}")
         return None
@@ -336,16 +426,19 @@ def fetch_final_averages(
     return results
 
 
-def discover_viewer_member_id() -> Optional[str]:
+def discover_voyager_ids() -> dict:
     """
-    Open a short Playwright session to auto-discover the viewer's LinkedIn
-    member ID from any played game's results page HTML or network responses.
+    Open a short Playwright session and auto-discover both the viewer's LinkedIn
+    member id and the connections-leaderboard queryId from a played game's
+    results page. Its Voyager traffic carries both — no dev tools required.
 
-    Returns the member ID string (e.g. 'ACoAAAEF5_EBCg...') or None if not found.
+    Returns {"viewer_member_id": <str|None>, "leaderboard_query_id": <str|None>}.
+    Either value is None when the page couldn't be loaded or didn't surface it
+    (e.g. the chosen game hasn't been played today).
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
-        return None
+        return {"viewer_member_id": None, "leaderboard_query_id": None}
 
     try:
         layout_games = load_layout().included_game_names()
@@ -353,20 +446,7 @@ def discover_viewer_member_id() -> Optional[str]:
     except Exception:
         game = GAMES[0]
 
-    found: list[str] = []
-
-    def _on_response(response):
-        if found:
-            return
-        if "voyager/api" not in response.url:
-            return
-        try:
-            body = response.text()
-            m = re.search(r"urn:li:fsd_game:\(([^,)]+),", body)
-            if m:
-                found.append(m.group(1))
-        except Exception:
-            pass
+    capture = _VoyagerIdCapture()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -380,22 +460,26 @@ def discover_viewer_member_id() -> Optional[str]:
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
-        page.on("response", _on_response)
+        capture.attach(page)
         try:
             page.goto(game["url"], wait_until="domcontentloaded", timeout=20_000)
             if "/results/" in page.url:
                 page.wait_for_selector(".pr-golden-chiclet, .pr-top__headline", timeout=10_000)
-            # Also search static HTML
-            if not found:
-                m = re.search(r"urn:li:fsd_game:\(([^,)]+),", page.content())
-                if m:
-                    found.append(m.group(1))
+            # Let the connections-leaderboard request fire before reading.
+            if capture.query_id is None:
+                page.wait_for_timeout(2500)
+            capture.scan_html(page.content())
         except Exception as exc:
-            logger.debug(f"discover_viewer_member_id page load: {exc}")
+            logger.debug(f"discover_voyager_ids page load: {exc}")
         finally:
             browser.close()
 
-    return found[0] if found else None
+    return {"viewer_member_id": capture.member_id, "leaderboard_query_id": capture.query_id}
+
+
+def discover_viewer_member_id() -> Optional[str]:
+    """Backward-compatible shim: return only the viewer member id."""
+    return discover_voyager_ids().get("viewer_member_id")
 
 
 def fetch_all_scores(
@@ -405,6 +489,7 @@ def fetch_all_scores(
     leaderboard_query_id: Optional[str] = None,
     viewer_member_id: Optional[str] = None,
     results_data: Optional[dict] = None,
+    discovered: Optional[dict] = None,
 ) -> list[GameResult]:
     """
     Launch a headless Playwright browser, restore the saved LinkedIn session,
@@ -435,6 +520,14 @@ def fetch_all_scores(
     results_data: full parsed results.json dict used to extrapolate today's
                   puzzle numbers for gameUrn construction. Pass None to skip
                   the leaderboard check even if query_id is set.
+
+    discovered: optional dict the caller passes in to receive ids auto-captured
+                from the anchor results-page load — "viewer_member_id" and
+                "leaderboard_query_id". Both LinkedIn embeds in its own traffic,
+                so this lets the caller seed/refresh config.json without dev
+                tools. Values captured here are also used as fallbacks when the
+                corresponding argument is empty (and, for the query id, to
+                self-heal when LinkedIn rotates the hash).
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
@@ -472,6 +565,12 @@ def fetch_all_scores(
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
+
+        # Passively harvest the viewer member id + leaderboard queryId from the
+        # anchor page's own Voyager traffic (loaded just below). Lets us seed /
+        # self-heal config.json without dev tools.
+        id_capture = _VoyagerIdCapture()
+        id_capture.attach(page)
 
         # ── Determine unplayed games via a completed results page ─────────────
         # Anchor cascade (first match wins):
@@ -533,12 +632,30 @@ def fetch_all_scores(
                 for g in layout_games
             ]
 
+        # ── Report ids auto-captured from the anchor load back to the caller ──
+        # (member id + leaderboard queryId). The caller persists these to
+        # config.json — seeding them on first run and refreshing the queryId
+        # whenever LinkedIn rotates its hash.
+        if discovered is not None:
+            if id_capture.member_id:
+                discovered["viewer_member_id"] = id_capture.member_id
+            if id_capture.query_id:
+                discovered["leaderboard_query_id"] = id_capture.query_id
+
+        # Effective ids: prefer the explicit argument, fall back to what the
+        # anchor load surfaced, so a fresh config (empty values) still works.
+        eff_member_id = viewer_member_id or id_capture.member_id
+        eff_query_id = leaderboard_query_id or id_capture.query_id
+
         # ── Parallel leaderboard played/unplayed check (experimental) ────────
         # Calls the connections-leaderboard Voyager API for each game we're
         # about to fetch and logs the result alongside the anchor-based decision.
         # Purely observational — does not change any fetch decision below.
-        if leaderboard_query_id and viewer_member_id and results_data is not None:
+        if eff_query_id and eff_member_id and results_data is not None:
             today = date.today()
+            csrf_token = _voyager_csrf_token(context)
+            if not csrf_token:
+                logger.debug("No JSESSIONID cookie — leaderboard check will be unavailable")
             for game in games_to_fetch:
                 game_key = game["key"]
                 puzzle_num = _extrapolate_puzzle_number(game_key, today, results_data)
@@ -546,7 +663,7 @@ def fetch_all_scores(
                     logger.debug(f"{game['name']}: no prior puzzle number — leaderboard check skipped")
                     continue
                 lb_played = _check_played_leaderboard(
-                    context, game_key, puzzle_num, viewer_member_id, leaderboard_query_id
+                    context, game_key, puzzle_num, eff_member_id, eff_query_id, csrf_token
                 )
                 anchor_says = "unplayed" if game["name"] in unplayed else "played"
                 if lb_played is None:
