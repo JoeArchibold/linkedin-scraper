@@ -368,6 +368,31 @@ def _save_debug(page: Page, debug_dir: Path, slug: str, chiclets_found: bool) ->
     logger.info(f"  Debug files saved: {screenshot_path.name}, {html_path.name}")
 
 
+def _norm_val(v) -> str:
+    """Normalize a stored/parsed number or score to a comparable string."""
+    return str(v).strip() if v is not None else ""
+
+
+def _finalize_mismatch_reason(entry: dict, result: GameResult) -> Optional[str]:
+    """
+    Basic sanity check that a finalization results page is really for the puzzle
+    we requested, guarding against LinkedIn silently serving a different results
+    page for a stale/invalid gameUrn (which would corrupt the historical record).
+
+    The gameUrn's puzzle number selects the puzzle server-side and is trusted;
+    the puzzle number *displayed* on a past-puzzle results page is unreliable, so
+    it is deliberately NOT compared. Instead we compare the recorded score, which
+    is immutable once set — if the page's score differs from what we stored for
+    this day, the wrong results were served. Returns None when the score matches,
+    or a human-readable reason otherwise.
+    """
+    stored_score = _norm_val(entry.get("score"))
+    got_score    = _norm_val(result.score)
+    if got_score != stored_score:
+        return f"stored score {stored_score or '?'} but page returned {got_score or '?'}"
+    return None
+
+
 def fetch_final_averages(
     target_games: dict,
     viewer_member_id: str,
@@ -426,6 +451,22 @@ def fetch_final_averages(
             logger.info(f"Finalizing {game['name']} (puzzle #{number}) …")
             result = _fetch_game(page, game, debug_dir=debug_dir, game_urn=game_urn)
             fetches_done += 1
+
+            # Sanity-check the loaded page against the recorded (immutable) score
+            # before accepting its average — otherwise a mis-served page would
+            # write a wrong average against this historical date. The displayed
+            # puzzle number is unreliable for past puzzles, so it is not checked.
+            if result.avg is not None:
+                mismatch = _finalize_mismatch_reason(entry, result)
+                if mismatch:
+                    logger.error(
+                        f"{game['name']}: score mismatch — {mismatch}. "
+                        "Discarding average to protect the historical record."
+                    )
+                    result = GameResult(
+                        name=game["name"], score=None, avg=None,
+                        number=result.number, error="score mismatch",
+                    )
 
             # Try to extract viewerMemberId from the first page we load as a
             # sanity-check / future-proof discovery path (result not used here).
