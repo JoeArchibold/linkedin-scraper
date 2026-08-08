@@ -17,5 +17,6 @@
     "crossclimb"
   ],
   "viewer_member_id": "",
-  "leaderboard_query_id": ""
+  "leaderboard_query_id": "",
+  "finalize_delay_seconds": 2.0
 }

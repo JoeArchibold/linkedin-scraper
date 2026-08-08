@@ -42,13 +42,22 @@ try:
 except ImportError:
     _TZLOCAL_AVAILABLE = False
 
-from linkedin_scraper import fetch_all_scores, fetch_final_averages, discover_voyager_ids, GameResult
+from linkedin_scraper import (
+    fetch_all_scores, fetch_final_averages, discover_voyager_ids,
+    sleep_with_jitter, GameResult,
+)
 from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages, read_results_data
 from sheet_layout import load_layout
 from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE
 
 # LinkedIn games reset at midnight Pacific time
 _LINKEDIN_TZ = ZoneInfo("America/Los_Angeles")
+
+# Default pause (seconds, jittered) between finalization page loads — both
+# between games within a day and between days in a multi-day audit. Keeps
+# finalization under LinkedIn's rate limits. Override via --delay or the
+# "finalize_delay_seconds" key in config.json.
+DEFAULT_FINALIZE_DELAY = 2.0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -185,12 +194,15 @@ def _run_finalizer(
     output_path: Path,
     viewer_member_id: str,
     debug_dir: Path | None,
+    delay: float = 0.0,
 ) -> bool:
     """
     Finalize averages for target_date. Returns True if any averages were written.
 
     Loads yesterday's results pages via ?gameUrn= to capture the post-deadline
     frozen average, then upserts into the JSON store with avg_is_final=True.
+
+    delay: seconds (jittered) to pause between each game's page load.
     """
     finalizable = get_finalizable_games(output_path, target_date)
     if not finalizable:
@@ -200,7 +212,7 @@ def _run_finalizer(
     logger.info(f"Finalizing {len(finalizable)} game(s) from {target_date} …")
 
     try:
-        finals = fetch_final_averages(finalizable, viewer_member_id, debug_dir)
+        finals = fetch_final_averages(finalizable, viewer_member_id, debug_dir, delay=delay)
     except FileNotFoundError as exc:
         logger.error(str(exc))
         return False
@@ -222,6 +234,23 @@ def _run_finalizer(
     print_results(finals, target_date, final=True)
     logger.info(f"Finalization complete: {count} game(s) updated for {target_date}.")
     return True
+
+
+def _resolve_delay(args, layout) -> float:
+    """
+    Finalization inter-request delay (seconds), precedence:
+    --delay flag > "finalize_delay_seconds" in config.json > DEFAULT_FINALIZE_DELAY.
+    Negative values are clamped to 0.
+    """
+    if args.delay is not None:
+        return max(0.0, args.delay)
+    raw = layout.raw.get("finalize_delay_seconds")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            logger.warning(f"Ignoring invalid finalize_delay_seconds={raw!r} in config.")
+    return DEFAULT_FINALIZE_DELAY
 
 
 def _resolve_csv_path(args, layout, output_path: Path) -> Path:
@@ -318,9 +347,12 @@ def _run_check_finalized(
             )
             return 1
 
+    delay = _resolve_delay(args, layout)
     finalized_any = False
-    for d, _ in unfinalized:
-        if _run_finalizer(d, output_path, viewer_member_id, debug_dir):
+    for i, (d, _) in enumerate(unfinalized):
+        if i:
+            sleep_with_jitter(delay)
+        if _run_finalizer(d, output_path, viewer_member_id, debug_dir, delay=delay):
             finalized_any = True
 
     if finalized_any:
@@ -369,6 +401,10 @@ def main() -> int:
                              "them. Does not collect today.")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="Assume 'yes' to confirmation prompts (e.g. for --check-finalized).")
+    parser.add_argument("--delay", metavar="SECONDS", type=float, default=None,
+                        help="Seconds to pause (jittered) between finalization page loads, to "
+                             f"avoid rate limiting. Default {DEFAULT_FINALIZE_DELAY}, or the "
+                             "\"finalize_delay_seconds\" key in config.json. Use --delay 0 to disable.")
     args = parser.parse_args()
 
     if args.finalize and args.update:
@@ -464,7 +500,10 @@ def main() -> int:
                 logger.warning(msg)
 
         if viewer_member_id:
-            did_finalize = _run_finalizer(fin_date, output_path, viewer_member_id, debug_dir)
+            did_finalize = _run_finalizer(
+                fin_date, output_path, viewer_member_id, debug_dir,
+                delay=_resolve_delay(args, layout),
+            )
             if did_finalize:
                 _export_csv_if_requested(args, layout, output_path)
 

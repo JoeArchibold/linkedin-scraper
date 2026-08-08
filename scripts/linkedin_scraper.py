@@ -7,6 +7,8 @@ store.
 """
 
 import re
+import time
+import random
 import logging
 import urllib.parse
 from dataclasses import dataclass, field
@@ -22,6 +24,15 @@ from config import GAMES, GAME_IDS
 from sheet_layout import load_layout
 
 logger = logging.getLogger(__name__)
+
+
+def sleep_with_jitter(seconds: float) -> None:
+    """
+    Sleep `seconds` with ±15% jitter to space out consecutive requests and
+    reduce the chance of tripping LinkedIn's rate limiting. No-op for seconds<=0.
+    """
+    if seconds and seconds > 0:
+        time.sleep(seconds * random.uniform(0.85, 1.15))
 
 
 @dataclass
@@ -361,6 +372,7 @@ def fetch_final_averages(
     target_games: dict,
     viewer_member_id: str,
     debug_dir: Optional[Path] = None,
+    delay: float = 0.0,
 ) -> list[GameResult]:
     """
     Load past results pages via ?gameUrn= to capture frozen post-deadline averages.
@@ -368,6 +380,9 @@ def fetch_final_averages(
     target_games: {game_key: {"number": "<puzzle_num>", ...}} from get_finalizable_games().
     Returns GameResult list; only avg (and error) are meaningful — score/number
     are not re-written by the caller.
+
+    delay: seconds to pause (with jitter) before each game load after the first,
+    to avoid tripping rate limiting when finalizing many games/days.
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
@@ -391,6 +406,7 @@ def fetch_final_averages(
         )
         page = context.new_page()
         first_page = True
+        fetches_done = 0
 
         for game_key, entry in target_games.items():
             game = game_by_key.get(game_key)
@@ -403,9 +419,13 @@ def fetch_final_averages(
                 results.append(GameResult(name=game["name"], score=None, avg=None, error="no puzzle number"))
                 continue
 
+            if fetches_done:
+                sleep_with_jitter(delay)
+
             game_urn = _build_game_urn(viewer_member_id, game_key, number)
             logger.info(f"Finalizing {game['name']} (puzzle #{number}) …")
             result = _fetch_game(page, game, debug_dir=debug_dir, game_urn=game_urn)
+            fetches_done += 1
 
             # Try to extract viewerMemberId from the first page we load as a
             # sanity-check / future-proof discovery path (result not used here).
