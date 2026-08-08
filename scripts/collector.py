@@ -195,19 +195,23 @@ def _run_finalizer(
     viewer_member_id: str,
     debug_dir: Path | None,
     delay: float = 0.0,
-) -> bool:
+) -> tuple[bool, bool]:
     """
-    Finalize averages for target_date. Returns True if any averages were written.
+    Finalize averages for target_date. Returns (ok, changed):
+      ok      — False only on a real failure (fetch/write error, or no averages
+                retrieved); True when it succeeded OR there was simply nothing
+                left to finalize (an idempotent no-op).
+      changed — True when at least one average was written.
 
-    Loads yesterday's results pages via ?gameUrn= to capture the post-deadline
-    frozen average, then upserts into the JSON store with avg_is_final=True.
+    Loads results pages via ?gameUrn= to capture the post-deadline frozen
+    average, then upserts into the JSON store with avg_is_final=True.
 
     delay: seconds (jittered) to pause between each game's page load.
     """
     finalizable = get_finalizable_games(output_path, target_date)
     if not finalizable:
         logger.info(f"All averages already finalized for {target_date} (or no data).")
-        return False
+        return True, False
 
     logger.info(f"Finalizing {len(finalizable)} game(s) from {target_date} …")
 
@@ -215,25 +219,25 @@ def _run_finalizer(
         finals = fetch_final_averages(finalizable, viewer_member_id, debug_dir, delay=delay)
     except FileNotFoundError as exc:
         logger.error(str(exc))
-        return False
+        return False, False
     except Exception as exc:
         logger.error(f"Finalization fetch failed: {exc}")
-        return False
+        return False, False
 
     finalized = [r for r in finals if r.avg is not None]
     if not finalized:
         logger.warning("No averages retrieved during finalization — store not updated.")
-        return False
+        return False, False
 
     try:
         count = write_final_averages(finals, target_date, output_path)
     except Exception as exc:
         logger.error(f"Failed to write final averages: {exc}")
-        return False
+        return False, False
 
     print_results(finals, target_date, final=True)
     logger.info(f"Finalization complete: {count} game(s) updated for {target_date}.")
-    return True
+    return True, True
 
 
 def _resolve_delay(args, layout) -> float:
@@ -349,14 +353,23 @@ def _run_check_finalized(
 
     delay = _resolve_delay(args, layout)
     finalized_any = False
+    failed_days: list[date] = []
     for i, (d, _) in enumerate(unfinalized):
         if i:
             sleep_with_jitter(delay)
-        if _run_finalizer(d, output_path, viewer_member_id, debug_dir, delay=delay):
-            finalized_any = True
+        ok, changed = _run_finalizer(d, output_path, viewer_member_id, debug_dir, delay=delay)
+        finalized_any = finalized_any or changed
+        if not ok:
+            failed_days.append(d)
 
     if finalized_any:
         _export_csv_if_requested(args, layout, output_path)
+    if failed_days:
+        logger.error(
+            f"Finalization audit finished with {len(failed_days)} day(s) failed: "
+            f"{', '.join(d.isoformat() for d in failed_days)}"
+        )
+        return 1
     logger.info("Finalization audit complete.")
     return 0
 
@@ -481,6 +494,19 @@ def main() -> int:
                 logger.error(f"Invalid --finalize-date: {args.finalize_date!r} (expected YYYY-MM-DD)")
                 return 1
 
+        # Safeguard: a day's average stays preliminary until its midnight-Pacific
+        # deadline, so refuse to "finalize" today or any future date — doing so
+        # would freeze a still-moving average. Only dates strictly before today
+        # (LinkedIn/Pacific) are finalizable. Auto mode always targets yesterday,
+        # so this only ever fires on a bad --finalize-date.
+        if fin_date >= linkedin_date:
+            logger.error(
+                f"Cannot finalize {fin_date}: its average is still preliminary until the "
+                f"midnight-Pacific deadline. Only dates before {linkedin_date} "
+                "(today, LinkedIn/Pacific) can be finalized."
+            )
+            return 1
+
         # Check early whether there's anything to finalize before discovering vmid
         finalizable_check = get_finalizable_games(output_path, fin_date)
         if finalizable_check and not viewer_member_id:
@@ -499,17 +525,21 @@ def main() -> int:
                     return 1
                 logger.warning(msg)
 
+        finalize_ok = True
         if viewer_member_id:
-            did_finalize = _run_finalizer(
+            finalize_ok, changed = _run_finalizer(
                 fin_date, output_path, viewer_member_id, debug_dir,
                 delay=_resolve_delay(args, layout),
             )
-            if did_finalize:
+            if changed:
                 _export_csv_if_requested(args, layout, output_path)
 
         if args.finalize:
-            logger.info("Done.")
-            return 0
+            if finalize_ok:
+                logger.info("Done.")
+                return 0
+            logger.error(f"Finalization of {fin_date} failed.")
+            return 1
 
     # ── Check existing data ───────────────────────────────────────────────────
     try:
