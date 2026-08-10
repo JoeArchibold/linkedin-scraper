@@ -46,7 +46,7 @@ except ImportError:
     _TZLOCAL_AVAILABLE = False
 
 from linkedin_scraper import (
-    fetch_all_scores, fetch_final_averages, discover_voyager_ids,
+    fetch_all_scores, fetch_final_averages, discover_viewer_member_id,
     fetch_game_states, sleep_with_jitter, GameResult,
 )
 from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages
@@ -344,9 +344,8 @@ def _run_check_finalized(
     # Finalization needs viewer_member_id to build gameUrns; discover if absent.
     if not viewer_member_id:
         logger.info("viewer_member_id not in config — attempting auto-discovery …")
-        discovered = discover_voyager_ids()
-        viewer_member_id = (discovered.get("viewer_member_id") or "").strip()
-        _save_config_values(discovered)
+        viewer_member_id = (discover_viewer_member_id() or "").strip()
+        _save_config_values({"viewer_member_id": viewer_member_id})
         if not viewer_member_id:
             logger.error(
                 "Could not auto-discover viewer_member_id (needs a game played today). "
@@ -546,10 +545,8 @@ def main() -> int:
         finalizable_check = get_finalizable_games(output_path, fin_date)
         if finalizable_check and not viewer_member_id:
             logger.info("viewer_member_id not in config — attempting auto-discovery …")
-            discovered = discover_voyager_ids()
-            viewer_member_id = (discovered.get("viewer_member_id") or "").strip()
-            # Seed both ids (member id + leaderboard queryId) while we're here.
-            _save_config_values(discovered)
+            viewer_member_id = (discover_viewer_member_id() or "").strip()
+            _save_config_values({"viewer_member_id": viewer_member_id})
             if not viewer_member_id:
                 msg = (
                     "Could not auto-discover viewer_member_id (needs a game played today). "

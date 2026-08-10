@@ -66,34 +66,22 @@ def _try_extract_viewer_member_id(html: str) -> Optional[str]:
 
 # viewerMemberId is the first segment of a gameUrn: urn:li:fsd_game:(<member>,...).
 _GAME_URN_MEMBER_RE = re.compile(r"urn:li:fsd_game:\(([^,)]+),")
-# The connections-leaderboard queryId hash rides on the request URL as
-# queryId=voyagerIdentityDashGameConnectionsEntities.<hash>.
-_LEADERBOARD_QID_RE = re.compile(r"voyagerIdentityDashGameConnectionsEntities\.([0-9a-f]{16,})")
 
 
 class _VoyagerIdCapture:
     """
-    Passive listener that harvests the viewer member id and the connections-
-    leaderboard queryId from a page's Voyager traffic. Attach with attach(page)
-    before navigating, then read .member_id / .query_id afterward.
-
-    Both values are stable identifiers LinkedIn embeds in its own web app, so
-    loading any played game's results page surfaces them with no dev tools —
-    the queryId in the leaderboard request URL, the member id in gameUrns.
+    Passive listener that harvests the viewer member id from a page's Voyager
+    traffic (the gameUrn LinkedIn embeds in its own requests/responses). Attach
+    with attach(page) before navigating, then read .member_id afterward — no
+    dev tools needed.
     """
 
     def __init__(self) -> None:
         self.member_id: Optional[str] = None
-        self.query_id: Optional[str] = None
 
     def _scan_url(self, url: str) -> None:
-        decoded = urllib.parse.unquote(url)
-        if self.query_id is None:
-            m = _LEADERBOARD_QID_RE.search(decoded)
-            if m:
-                self.query_id = m.group(1)
         if self.member_id is None:
-            m = _GAME_URN_MEMBER_RE.search(decoded)
+            m = _GAME_URN_MEMBER_RE.search(urllib.parse.unquote(url))
             if m:
                 self.member_id = m.group(1)
 
@@ -415,19 +403,16 @@ def fetch_final_averages(
     return results
 
 
-def discover_voyager_ids() -> dict:
+def discover_viewer_member_id() -> Optional[str]:
     """
-    Open a short Playwright session and auto-discover both the viewer's LinkedIn
-    member id and the connections-leaderboard queryId from a played game's
-    results page. Its Voyager traffic carries both — no dev tools required.
-
-    Returns {"viewer_member_id": <str|None>, "leaderboard_query_id": <str|None>}.
-    Either value is None when the page couldn't be loaded or didn't surface it
-    (e.g. the chosen game hasn't been played today).
+    Open a short Playwright session and auto-discover the viewer's LinkedIn
+    member id from a played game's results page — its Voyager traffic carries
+    the gameUrn. Returns the member id, or None when the page couldn't be
+    loaded or didn't surface it (e.g. the chosen game hasn't been played today).
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
-        return {"viewer_member_id": None, "leaderboard_query_id": None}
+        return None
 
     try:
         layout_games = load_layout().included_game_names()
@@ -454,21 +439,13 @@ def discover_voyager_ids() -> dict:
             page.goto(game["url"], wait_until="domcontentloaded", timeout=20_000)
             if "/results/" in page.url:
                 page.wait_for_selector(".pr-golden-chiclet, .pr-top__headline", timeout=10_000)
-            # Let the connections-leaderboard request fire before reading.
-            if capture.query_id is None:
-                page.wait_for_timeout(2500)
             capture.scan_html(page.content())
         except Exception as exc:
-            logger.debug(f"discover_voyager_ids page load: {exc}")
+            logger.debug(f"discover_viewer_member_id page load: {exc}")
         finally:
             browser.close()
 
-    return {"viewer_member_id": capture.member_id, "leaderboard_query_id": capture.query_id}
-
-
-def discover_viewer_member_id() -> Optional[str]:
-    """Backward-compatible shim: return only the viewer member id."""
-    return discover_voyager_ids().get("viewer_member_id")
+    return capture.member_id
 
 
 # The consolidated games-hub endpoint's queryId hash (rotates — rediscovered
