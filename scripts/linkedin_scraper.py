@@ -584,9 +584,17 @@ def _parse_game_states(data: dict) -> dict[str, GameState]:
         record = game.get("gameStoredRecord")
         raw = (record.get("gamePlayState") if isinstance(record, dict) else None) or _UNPLAYED_STATE
         puzzle = game.get("puzzleId")
+        played = raw != _UNPLAYED_STATE
+        # Surface any terminal state we haven't seen yet (e.g. a loss, expected to
+        # be END_UNSOLVED) so it self-documents on first occurrence — still played.
+        if played and raw != "END_SOLVED":
+            logger.info(
+                f"GameEntryPoints: {key} (puzzle {puzzle}) reports unseen "
+                f"gamePlayState {raw!r} — treated as played."
+            )
         states[key] = GameState(
             game_key=key,
-            played=raw != _UNPLAYED_STATE,
+            played=played,
             puzzle_number=int(puzzle) if puzzle is not None else None,
             raw_state=raw,
         )
