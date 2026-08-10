@@ -12,7 +12,6 @@ import random
 import logging
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -128,37 +127,6 @@ class _VoyagerIdCapture:
                 self.member_id = m.group(1)
 
 
-def _extrapolate_puzzle_number(
-    game_key: str,
-    target_date: date,
-    results_data: dict,
-) -> Optional[int]:
-    """
-    Compute today's puzzle number for game_key using linear extrapolation from
-    the most recent stored entry. Puzzle numbers are confirmed perfectly linear
-    (+1 per day). Returns None if no prior entry exists for this game.
-    """
-    best_date: Optional[date] = None
-    best_number: Optional[int] = None
-    for date_str, rec in results_data.items():
-        games = (rec or {}).get("games") or {}
-        entry = (games.get(game_key) or {})
-        num_str = entry.get("number")
-        if not num_str:
-            continue
-        try:
-            num = int(num_str)
-            d = date.fromisoformat(date_str)
-            if best_date is None or d > best_date:
-                best_date = d
-                best_number = num
-        except (ValueError, TypeError):
-            continue
-    if best_date is None or best_number is None:
-        return None
-    return best_number + (target_date - best_date).days
-
-
 def _voyager_csrf_token(context: BrowserContext) -> Optional[str]:
     """
     Return the CSRF token Voyager requires: the JSESSIONID cookie value with
@@ -167,55 +135,6 @@ def _voyager_csrf_token(context: BrowserContext) -> Optional[str]:
     """
     jsession = next((c["value"] for c in context.cookies() if c["name"] == "JSESSIONID"), None)
     return jsession.strip('"') if jsession else None
-
-
-def _check_played_leaderboard(
-    context: BrowserContext,
-    game_key: str,
-    puzzle_number: int,
-    viewer_member_id: str,
-    query_id: str,
-    csrf_token: Optional[str],
-) -> Optional[bool]:
-    """
-    Call the connections-leaderboard Voyager API and return True (played),
-    False (unplayed), or None (API error / queryId stale). Timer-safe: does
-    not load any game board page.
-
-    The played signal is the viewer's own rank in the leaderboard snapshot
-    (metadata.memberRanking), which is null until the viewer plays. The
-    connections list (elements) is populated regardless, so it is NOT a
-    played signal.
-    """
-    game_urn = _build_game_urn(viewer_member_id, game_key, str(puzzle_number))
-    encoded_urn = urllib.parse.quote(game_urn, safe="")
-    url = (
-        "https://www.linkedin.com/voyager/api/graphql"
-        f"?variables=(gameUrn:{encoded_urn})"
-        f"&queryId=voyagerIdentityDashGameConnectionsEntities.{query_id}"
-    )
-    headers = {
-        "accept": "application/json",
-        "x-li-lang": "en_US",
-        "x-restli-protocol-version": "2.0.0",
-    }
-    if csrf_token:
-        headers["csrf-token"] = csrf_token
-    try:
-        resp = context.request.get(url, headers=headers)
-        if resp.status != 200:
-            logger.debug(f"Leaderboard API {resp.status} for {game_key}")
-            return None
-        data = resp.json()
-        snapshot = (
-            (data.get("data") or {})
-            .get("identityDashGameConnectionsEntitiesByLeaderboardSnapshotV2")
-        ) or {}
-        metadata = snapshot.get("metadata") or {}
-        return metadata.get("memberRanking") is not None
-    except Exception as exc:
-        logger.debug(f"Leaderboard check failed for {game_key}: {exc}")
-        return None
 
 
 def _extract_from_html(html: str, game_name: str, is_time: bool) -> tuple[Optional[str], Optional[str]]:
@@ -621,20 +540,40 @@ def _fetch_game_states(context: BrowserContext, query_id: str, csrf_token: Optio
     return _parse_game_states(resp.json())
 
 
+def _detect_states_in_context(page: Page, context: BrowserContext) -> dict[str, GameState]:
+    """
+    Load the games hub in `page` (a safe landing page — no game board, no
+    timers), rediscover the rotating GameEntryPoints queryId from its own
+    traffic, and replay it. Returns {game_key: GameState}; raises on discovery
+    or API failure so callers can fall back.
+    """
+    query_holder: list[str] = []
+
+    def _on_request(request) -> None:
+        if query_holder:
+            return
+        m = _ENTRYPOINTS_QID_RE.search(urllib.parse.unquote(request.url))
+        if m:
+            query_holder.append(m.group(1))
+
+    page.on("request", _on_request)
+    page.goto("https://www.linkedin.com/games/", wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_timeout(4000)
+    if not query_holder:
+        raise RuntimeError("Could not discover the GameEntryPoints queryId from the games hub.")
+    csrf = _voyager_csrf_token(context)
+    return _fetch_game_states(context, query_holder[0], csrf)
+
+
 def fetch_game_states() -> dict[str, GameState]:
     """
-    Timer-safe played/unplayed + puzzle-number for every game in ONE call.
-
-    Loads the games hub (a safe landing page — no game board, no timers) to
-    rediscover the rotating GameEntryPoints queryId from its own traffic, then
-    replays it with csrf auth. Returns {game_key: GameState}. Raises on
+    Timer-safe played/unplayed + puzzle-number for every game in ONE call, in a
+    self-contained browser session (see _detect_states_in_context). Raises on
     auth-missing / discovery / API failure so callers can fall back.
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
         raise FileNotFoundError("LinkedIn session not found. Run setup_auth.py first.")
-
-    query_holder: list[str] = []
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -648,22 +587,8 @@ def fetch_game_states() -> dict[str, GameState]:
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
-
-        def _on_request(request) -> None:
-            if query_holder:
-                return
-            m = _ENTRYPOINTS_QID_RE.search(urllib.parse.unquote(request.url))
-            if m:
-                query_holder.append(m.group(1))
-
-        page.on("request", _on_request)
         try:
-            page.goto("https://www.linkedin.com/games/", wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(4000)
-            if not query_holder:
-                raise RuntimeError("Could not discover the GameEntryPoints queryId from the games hub.")
-            csrf = _voyager_csrf_token(context)
-            return _fetch_game_states(context, query_holder[0], csrf)
+            return _detect_states_in_context(page, context)
         finally:
             browser.close()
 
@@ -672,48 +597,126 @@ def fetch_all_scores(
     names: Optional[set[str]] = None,
     debug_dir: Optional[Path] = None,
     anchor_name: Optional[str] = None,
-    leaderboard_query_id: Optional[str] = None,
-    viewer_member_id: Optional[str] = None,
-    results_data: Optional[dict] = None,
-    discovered: Optional[dict] = None,
 ) -> list[GameResult]:
     """
-    Launch a headless Playwright browser, restore the saved LinkedIn session,
-    and scrape game results pages. Returns a list of GameResult objects in
-    layout order (the games included in config.json); games excluded from
-    the layout are never fetched or returned.
+    Scrape game results into GameResult objects in layout order (config.json
+    games only; excluded games are never fetched or returned).
 
-    names: optional set of game names to fetch. Layout-included games not in the
-           set are returned as all-None placeholders so the list always covers
-           every layout game. Pass None (default) to fetch every layout game.
+    Primary path: one consolidated GameEntryPoints call decides played/unplayed
+    and supplies authoritative puzzle numbers, so only played games that still
+    need data are navigated — timer-safe, and it works on a fresh day with
+    nothing played. If that endpoint is unavailable (rotation/network/API
+    error, or a game is missing from its response), falls back to the anchor
+    method (_fetch_all_scores_via_anchor).
 
-    debug_dir: save a screenshot + HTML dump for every page visited when set.
+    names: optional set of game names to fetch; layout games outside the set come
+           back as all-None placeholders. None (default) fetches every layout game.
+    debug_dir: save a screenshot + HTML dump per page when set.
+    anchor_name: preferred anchor for the fallback path only.
+    """
+    linkedin_state = get_linkedin_state()
+    if linkedin_state is None:
+        raise FileNotFoundError(
+            "LinkedIn session not found in the OS credential store.\n"
+            "Run setup_auth.py first to log in and save your session."
+        )
 
-    anchor_name: display name of a game to prefer as the anchor results page
-                 when no already-recorded game is available. Typically the
-                 game the user plays first each day, so its results page is
-                 the most likely to be complete on a fresh day.
+    try:
+        included_names = set(load_layout().included_game_names())
+        layout_games = [g for g in GAMES if g["name"] in included_names]
+    except Exception as exc:
+        logger.warning(f"Could not read layout ({exc}); fetching all configured games.")
+        layout_games = list(GAMES)
+    if not layout_games:
+        layout_games = list(GAMES)
 
-    leaderboard_query_id: when non-empty, make a parallel played/unplayed check
-                          via the connections-leaderboard Voyager API for each
-                          game and log the comparison against the anchor result.
-                          Does not change any fetch decision — anchor method
-                          remains authoritative. Empty or None disables this.
+    games_to_fetch = [g for g in layout_games if names is None or g["name"] in names]
 
-    viewer_member_id: LinkedIn member URN required for gameUrn construction when
-                      leaderboard_query_id is provided. Read from config.json.
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context: BrowserContext = browser.new_context(
+            storage_state=linkedin_state,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
 
-    results_data: full parsed results.json dict used to extrapolate today's
-                  puzzle numbers for gameUrn construction. Pass None to skip
-                  the leaderboard check even if query_id is set.
+        # ── Primary: consolidated GameEntryPoints detection ──────────────────
+        # On any detection problem, set use_fallback and defer the anchor call
+        # until AFTER this sync_playwright context closes — a nested Playwright
+        # session (as the fallback opens) is not allowed inside this one.
+        use_fallback = False
+        fetched: dict[str, GameResult] = {}
+        try:
+            states = _detect_states_in_context(page, context)
+        except Exception as exc:
+            logger.warning(
+                f"GameEntryPoints detection unavailable ({exc}); "
+                "falling back to the anchor method."
+            )
+            use_fallback = True
+            states = {}
 
-    discovered: optional dict the caller passes in to receive ids auto-captured
-                from the anchor results-page load — "viewer_member_id" and
-                "leaderboard_query_id". Both LinkedIn embeds in its own traffic,
-                so this lets the caller seed/refresh config.json without dev
-                tools. Values captured here are also used as fallbacks when the
-                corresponding argument is empty (and, for the query id, to
-                self-heal when LinkedIn rotates the hash).
+        if not use_fallback:
+            # If the endpoint didn't return a state for a game we need, don't
+            # guess — fall back to the anchor method for the whole run.
+            missing = [g["name"] for g in games_to_fetch if g["key"] not in states]
+            if missing:
+                logger.warning(
+                    f"GameEntryPoints returned no state for {', '.join(missing)}; "
+                    "falling back to the anchor method."
+                )
+                use_fallback = True
+
+        if not use_fallback:
+            unplayed = {g["name"] for g in games_to_fetch if not states[g["key"]].played}
+            if unplayed:
+                logger.info(f"Not yet played today: {', '.join(sorted(unplayed))}")
+
+            for game in games_to_fetch:
+                st = states[game["key"]]
+                if not st.played:
+                    logger.info(f"{game['name']}: not yet played today — skipping")
+                    fetched[game["name"]] = GameResult(name=game["name"], score=None, avg=None, unplayed=True)
+                    continue
+                result = _fetch_game(page, game, debug_dir=debug_dir)
+                # Prefer the endpoint's authoritative puzzle number over the page's.
+                if result.score is not None and st.puzzle_number is not None:
+                    endpoint_num = str(st.puzzle_number)
+                    if result.number and result.number != endpoint_num:
+                        logger.warning(
+                            f"{game['name']}: results page #{result.number} != "
+                            f"endpoint #{endpoint_num}; using endpoint."
+                        )
+                    result.number = endpoint_num
+                fetched[game["name"]] = result
+
+        browser.close()
+
+    # Fallback runs outside the closed sync_playwright context above.
+    if use_fallback:
+        return _fetch_all_scores_via_anchor(names, debug_dir, anchor_name)
+
+    return [
+        fetched.get(g["name"], GameResult(name=g["name"], score=None, avg=None))
+        for g in layout_games
+    ]
+
+
+def _fetch_all_scores_via_anchor(
+    names: Optional[set[str]] = None,
+    debug_dir: Optional[Path] = None,
+    anchor_name: Optional[str] = None,
+) -> list[GameResult]:
+    """
+    Fallback collection path used when the GameEntryPoints endpoint is
+    unavailable: determine played/unplayed from a completed results page (the
+    anchor cascade) and scrape each played game. Returns GameResult objects in
+    layout order. names / debug_dir / anchor_name: see fetch_all_scores.
     """
     linkedin_state = get_linkedin_state()
     if linkedin_state is None:
@@ -751,12 +754,6 @@ def fetch_all_scores(
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
-
-        # Passively harvest the viewer member id + leaderboard queryId from the
-        # anchor page's own Voyager traffic (loaded just below). Lets us seed /
-        # self-heal config.json without dev tools.
-        id_capture = _VoyagerIdCapture()
-        id_capture.attach(page)
 
         # ── Determine unplayed games via a completed results page ─────────────
         # Anchor cascade (first match wins):
@@ -817,53 +814,6 @@ def fetch_all_scores(
                 fetched.get(g["name"], GameResult(name=g["name"], score=None, avg=None))
                 for g in layout_games
             ]
-
-        # ── Report ids auto-captured from the anchor load back to the caller ──
-        # (member id + leaderboard queryId). The caller persists these to
-        # config.json — seeding them on first run and refreshing the queryId
-        # whenever LinkedIn rotates its hash.
-        if discovered is not None:
-            if id_capture.member_id:
-                discovered["viewer_member_id"] = id_capture.member_id
-            if id_capture.query_id:
-                discovered["leaderboard_query_id"] = id_capture.query_id
-
-        # Effective ids: prefer the explicit argument, fall back to what the
-        # anchor load surfaced, so a fresh config (empty values) still works.
-        eff_member_id = viewer_member_id or id_capture.member_id
-        eff_query_id = leaderboard_query_id or id_capture.query_id
-
-        # ── Parallel leaderboard played/unplayed check (experimental) ────────
-        # Calls the connections-leaderboard Voyager API for each game we're
-        # about to fetch and logs the result alongside the anchor-based decision.
-        # Purely observational — does not change any fetch decision below.
-        if eff_query_id and eff_member_id and results_data is not None:
-            today = date.today()
-            csrf_token = _voyager_csrf_token(context)
-            if not csrf_token:
-                logger.debug("No JSESSIONID cookie — leaderboard check will be unavailable")
-            for game in games_to_fetch:
-                game_key = game["key"]
-                puzzle_num = _extrapolate_puzzle_number(game_key, today, results_data)
-                if puzzle_num is None:
-                    logger.debug(f"{game['name']}: no prior puzzle number — leaderboard check skipped")
-                    continue
-                lb_played = _check_played_leaderboard(
-                    context, game_key, puzzle_num, eff_member_id, eff_query_id, csrf_token
-                )
-                anchor_says = "unplayed" if game["name"] in unplayed else "played"
-                if lb_played is None:
-                    lb_label = "unavailable"
-                    match_marker = ""
-                elif lb_played:
-                    lb_label = "played"
-                    match_marker = " ✓" if anchor_says == "played" else " *** MISMATCH ***"
-                else:
-                    lb_label = "unplayed"
-                    match_marker = " ✓" if anchor_says == "unplayed" else " *** MISMATCH ***"
-                logger.info(
-                    f"{game['name']}: anchor={anchor_says}, leaderboard={lb_label}{match_marker}"
-                )
 
         # ── Fetch each game that needs data and isn't known-unplayed ──────────
         # Process the anchor first while its results page (loaded above for the

@@ -20,9 +20,12 @@ it loads yesterday's results pages via ?gameUrn= (which show the post-midnight f
 average) and updates avg + avg_is_final in the JSON store.  Requires viewer_member_id
 in config.json.
 
-viewer_member_id and leaderboard_query_id are both auto-discovered from a played game's
-results page (no dev tools) and saved to config.json — seeded on first run and, for the
-rotating leaderboard_query_id, refreshed automatically whenever LinkedIn changes it.
+viewer_member_id is auto-discovered from a played game's results page (no dev tools) and
+saved to config.json on first use.
+
+Played/unplayed detection and today's puzzle numbers come from one consolidated
+GameEntryPoints Voyager call (see --played-check); the older anchor-results-page method
+remains as an automatic fallback when that endpoint is unavailable.
 
 The CSV is a derived view, regenerated from the JSON each time. Use --export-csv to
 refresh it as part of a collection run, or run export_csv.py standalone.
@@ -46,7 +49,7 @@ from linkedin_scraper import (
     fetch_all_scores, fetch_final_averages, discover_voyager_ids,
     fetch_game_states, sleep_with_jitter, GameResult,
 )
-from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages, read_results_data
+from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages
 from sheet_layout import load_layout
 from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE, GAMES
 
@@ -170,9 +173,9 @@ def print_results(
 
 def _save_config_values(values: dict) -> None:
     """
-    Persist auto-discovered values (e.g. viewer_member_id, leaderboard_query_id)
-    into config.json. Only writes keys whose value differs from what's stored,
-    so a no-op discovery leaves the file untouched.
+    Persist auto-discovered values (e.g. viewer_member_id) into config.json.
+    Only writes keys whose value differs from what's stored, so a no-op
+    discovery leaves the file untouched.
     """
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -502,14 +505,7 @@ def main() -> int:
         output_path = DEFAULT_OUTPUT_PATH
     logger.info(f"Output file: {output_path}")
 
-    # ── Read existing store (shared by finalization + today's state check) ────
-    try:
-        results_data = read_results_data(output_path)
-    except Exception as exc:
-        logger.error(f"Could not read JSON store: {exc}")
-        return 1
-
-    # ── Resolve viewer_member_id (needed for finalization + leaderboard check) ─
+    # ── Resolve viewer_member_id (needed for finalization) ────────────────────
     viewer_member_id: str = (layout.raw.get("viewer_member_id") or "").strip()
 
     # ── Standalone finalized-status audit (--check-finalized) ─────────────────
@@ -606,26 +602,15 @@ def main() -> int:
     # ── Fetch ──────────────────────────────────────────────────────────────────
     anchor_name = layout.anchor_game_name()
 
-    leaderboard_query_id = (layout.raw.get("leaderboard_query_id") or "").strip() or None
-
-    # fetch_all_scores fills this from the anchor page's own traffic; we persist
-    # anything new/changed afterward so config.json seeds and self-heals.
-    discovered_ids: dict = {}
     try:
         results = fetch_all_scores(
             names=names_to_fetch,
             debug_dir=debug_dir,
             anchor_name=anchor_name,
-            leaderboard_query_id=leaderboard_query_id,
-            viewer_member_id=viewer_member_id or None,
-            results_data=results_data,
-            discovered=discovered_ids,
         )
     except FileNotFoundError as exc:
         logger.error(str(exc))
         return 1
-
-    _save_config_values(discovered_ids)
 
     print_results(results, linkedin_date, show_status=args.show_status)
 
