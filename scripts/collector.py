@@ -44,11 +44,11 @@ except ImportError:
 
 from linkedin_scraper import (
     fetch_all_scores, fetch_final_averages, discover_voyager_ids,
-    sleep_with_jitter, GameResult,
+    fetch_game_states, sleep_with_jitter, GameResult,
 )
 from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages, read_results_data
 from sheet_layout import load_layout
-from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE
+from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE, GAMES
 
 # LinkedIn games reset at midnight Pacific time
 _LINKEDIN_TZ = ZoneInfo("America/Los_Angeles")
@@ -374,6 +374,33 @@ def _run_check_finalized(
     return 0
 
 
+def _run_played_check() -> int:
+    """
+    Standalone diagnostic: print played/unplayed + puzzle number for every game
+    from the consolidated GameEntryPoints endpoint. Timer-safe; writes nothing.
+    """
+    try:
+        states = fetch_game_states()
+    except Exception as exc:
+        logger.error(f"Played-state check failed: {exc}")
+        return 1
+    if not states:
+        logger.warning("No game states returned by the endpoint.")
+        return 1
+
+    print()
+    print(f"{'game':<14} {'puzzle':<8} {'state':<10} raw")
+    print("-" * 46)
+    for g in GAMES:
+        st = states.get(g["key"])
+        if st is None:
+            continue
+        mark = "played" if st.played else "unplayed"
+        print(f"{g['name']:<14} {str(st.puzzle_number):<8} {mark:<10} {st.raw_state}")
+    print()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and record them in a local JSON store")
     parser.add_argument("--update",      action="store_true", help="Fetch all games and update scores + averages regardless of existing data")
@@ -418,6 +445,10 @@ def main() -> int:
                         help="Seconds to pause (jittered) between finalization page loads, to "
                              f"avoid rate limiting. Default {DEFAULT_FINALIZE_DELAY}, or the "
                              "\"finalize_delay_seconds\" key in config.json. Use --delay 0 to disable.")
+    parser.add_argument("--played-check", action="store_true",
+                        help="Standalone diagnostic: print each game's played/unplayed state and "
+                             "puzzle number from the consolidated GameEntryPoints endpoint, then "
+                             "exit. Timer-safe (no game boards loaded); writes nothing.")
     args = parser.parse_args()
 
     if args.finalize and args.update:
@@ -429,6 +460,14 @@ def main() -> int:
     if args.check_finalized is not None and (args.finalize or args.update or args.dry_run):
         logger.error("--check-finalized cannot be combined with --finalize, --update, or --dry-run.")
         return 1
+    if args.played_check and (args.finalize or args.update or args.dry_run or args.check_finalized is not None):
+        logger.error("--played-check cannot be combined with other modes.")
+        return 1
+
+    if args.played_check:
+        if args.summary_only:
+            logging.getLogger().setLevel(logging.ERROR)
+        return _run_played_check()
 
     if args.summary_only:
         logging.getLogger().setLevel(logging.ERROR)

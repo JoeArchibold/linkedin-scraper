@@ -45,6 +45,15 @@ class GameResult:
     unplayed: bool = False  # True when the game hasn't been played yet today
 
 
+@dataclass
+class GameState:
+    """Per-game play state from the consolidated GameEntryPoints endpoint."""
+    game_key: str
+    played: bool
+    puzzle_number: Optional[int]
+    raw_state: str          # e.g. "END_SOLVED", "END_UNSOLVED", "UNKNOWN"
+
+
 def _build_game_urn(viewer_member_id: str, game_key: str, puzzle_number_str: str) -> str:
     game_id = GAME_IDS[game_key]
     return f"urn:li:fsd_game:({viewer_member_id},{game_id},{int(puzzle_number_str)})"
@@ -541,6 +550,114 @@ def discover_voyager_ids() -> dict:
 def discover_viewer_member_id() -> Optional[str]:
     """Backward-compatible shim: return only the viewer member id."""
     return discover_voyager_ids().get("viewer_member_id")
+
+
+# The consolidated games-hub endpoint's queryId hash (rotates — rediscovered
+# per run from the hub's own traffic rather than stored).
+_ENTRYPOINTS_QID_RE = re.compile(r"voyagerIdentityDashGameEntryPoints\.([0-9a-f]{16,})")
+# A game is unplayed only when its stored record reads UNKNOWN (or is absent);
+# any other state (END_SOLVED win, END_UNSOLVED loss, …) counts as played.
+_UNPLAYED_STATE = "UNKNOWN"
+
+
+def _parse_game_states(data: dict) -> dict[str, GameState]:
+    """
+    Parse a GameEntryPoints (GAME_HUB) response into {game_key: GameState}.
+
+    Reads element.game.{gameTypeId, puzzleId, gameStoredRecord.gamePlayState},
+    maps gameTypeId via GAME_IDS, and deliberately ignores element.gameInsights
+    (third-party connection PII). Unmapped gameTypeIds are skipped with a warning.
+    """
+    id_to_key = {v: k for k, v in GAME_IDS.items()}
+    node = data.get("data") or {}
+    # Tolerate the extra 'data' nesting seen in the in-page response shape.
+    if "identityDashGameEntryPointsByTypes" not in node and isinstance(node.get("data"), dict):
+        node = node["data"]
+    elements = (node.get("identityDashGameEntryPointsByTypes") or {}).get("elements") or []
+    states: dict[str, GameState] = {}
+    for el in elements:
+        game = el.get("game") or {}
+        key = id_to_key.get(game.get("gameTypeId"))
+        if key is None:
+            logger.warning(f"GameEntryPoints: unmapped gameTypeId {game.get('gameTypeId')!r} — skipped")
+            continue
+        record = game.get("gameStoredRecord")
+        raw = (record.get("gamePlayState") if isinstance(record, dict) else None) or _UNPLAYED_STATE
+        puzzle = game.get("puzzleId")
+        states[key] = GameState(
+            game_key=key,
+            played=raw != _UNPLAYED_STATE,
+            puzzle_number=int(puzzle) if puzzle is not None else None,
+            raw_state=raw,
+        )
+    return states
+
+
+def _fetch_game_states(context: BrowserContext, query_id: str, csrf_token: Optional[str]) -> dict[str, GameState]:
+    """Call the consolidated GameEntryPoints endpoint within an existing context."""
+    url = (
+        "https://www.linkedin.com/voyager/api/graphql"
+        "?variables=(gameEntryPointType:GAME_HUB)"
+        f"&queryId=voyagerIdentityDashGameEntryPoints.{query_id}"
+    )
+    headers = {
+        "accept": "application/json",
+        "x-li-lang": "en_US",
+        "x-restli-protocol-version": "2.0.0",
+    }
+    if csrf_token:
+        headers["csrf-token"] = csrf_token
+    resp = context.request.get(url, headers=headers)
+    if resp.status != 200:
+        raise RuntimeError(f"GameEntryPoints API returned {resp.status}")
+    return _parse_game_states(resp.json())
+
+
+def fetch_game_states() -> dict[str, GameState]:
+    """
+    Timer-safe played/unplayed + puzzle-number for every game in ONE call.
+
+    Loads the games hub (a safe landing page — no game board, no timers) to
+    rediscover the rotating GameEntryPoints queryId from its own traffic, then
+    replays it with csrf auth. Returns {game_key: GameState}. Raises on
+    auth-missing / discovery / API failure so callers can fall back.
+    """
+    linkedin_state = get_linkedin_state()
+    if linkedin_state is None:
+        raise FileNotFoundError("LinkedIn session not found. Run setup_auth.py first.")
+
+    query_holder: list[str] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            storage_state=linkedin_state,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
+
+        def _on_request(request) -> None:
+            if query_holder:
+                return
+            m = _ENTRYPOINTS_QID_RE.search(urllib.parse.unquote(request.url))
+            if m:
+                query_holder.append(m.group(1))
+
+        page.on("request", _on_request)
+        try:
+            page.goto("https://www.linkedin.com/games/", wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(4000)
+            if not query_holder:
+                raise RuntimeError("Could not discover the GameEntryPoints queryId from the games hub.")
+            csrf = _voyager_csrf_token(context)
+            return _fetch_game_states(context, query_holder[0], csrf)
+        finally:
+            browser.close()
 
 
 def fetch_all_scores(
