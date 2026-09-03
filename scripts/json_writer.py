@@ -24,6 +24,12 @@ File shape:
       }
     }
 
+When connections-leaderboard data was scraped, a game entry may also carry
+no_hints / no_mistakes (booleans for the viewer's "You" row) and
+leaderboard_fetches (a map of every other connection's score/badges). Those
+fields are only ever written when the scraper supplies them, so a refresh never
+erases previously stored leaderboard data.
+
 Writes are atomic: the file is written to a sibling temp file and then
 os.replace()'d into place, so a crash mid-write cannot corrupt history.
 """
@@ -228,6 +234,15 @@ def write_json(results: list[GameResult], today: date, path: Path) -> None:
             entry["score"] = r.score
         if r.avg is not None:
             entry["avg"] = r.avg
+        # Connections-leaderboard data. Only overwrite when a value is present,
+        # so a leaderboard refresh (or a game with no leaderboard this run)
+        # never wipes previously stored leaderboard fields.
+        if r.no_hints is not None:
+            entry["no_hints"] = r.no_hints
+        if r.no_mistakes is not None:
+            entry["no_mistakes"] = r.no_mistakes
+        if r.leaderboard_fetches is not None:
+            entry["leaderboard_fetches"] = r.leaderboard_fetches
         if entry:
             games[game_key] = entry
 

@@ -61,28 +61,32 @@ cd ~/.claude/skills/linkedin-games-data-collector/scripts && python collector.py
 The script uses the LinkedIn/Pacific date because LinkedIn Games reset at midnight Pacific time.
 
 Default behavior:
+
 1. Check the configured JSON store for an existing entry for today's LinkedIn/Pacific date.
 2. If no entry exists, fetch all configured games and add a new one.
 3. If an entry exists with missing scores, fetch only the missing games and update it.
 4. If an entry exists with all scores present, the default run makes no changes and exits; use `--update` to re-fetch and refresh scores and averages (averages drift upward over the day).
 5. Print the results table. With `--summary-only`, suppress informational logs and keep only the table plus errors.
 
+For every game played and collected, the collector also scrapes that game's **connections leaderboard** and stores the viewer's `no_hints` / `no_mistakes` badges plus a `leaderboard_fetches` map of each connection's score and badges on that game's daily entry. Connections who play later in the day won't appear until the leaderboard is fetched again — use `--sync-leaderboards` to refresh every played game's leaderboard without re-collecting scores.
+
 The script reads played/unplayed state from a completed **anchor** game's results page (set by `anchor_game` in `config.json`) and skips unplayed games without opening them. If the anchor itself has not been played yet, the script collects nothing and exits cleanly (exit 0) to avoid starting timers on unplayed games — this is expected, not an error; re-run after the anchor game has been played.
 
 ## Parameters
 
-| Flag | Behavior |
-|------|----------|
-| *(none)* | Smart mode: only fetches games with missing scores |
-| `--update` | Fetch all configured games and refresh scores + averages regardless of existing data |
-| `--dry-run` | Run the check and fetch logic, print results, but do not write output |
-| `--debug` | Save a screenshot and HTML dump for every page visited to `scripts/debug/<timestamp>/` |
-| `--show-status` | Include a Status column in the printed results table |
-| `--summary-only` | Suppress informational logs and print only the results table plus errors |
-| `--timezone <TZ>` | Override local timezone detection for the midnight/Pacific-date warning, e.g. `--timezone America/New_York` |
-| `--output <FILE>` | Override the JSON store path. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` in `.env` (fallback) > `./results.json` |
-| `--export-csv` | After writing the store, also regenerate the CSV view (same as `"export_csv_on_run": true` in `config.json`) |
-| `--csv-output <FILE>` | Path for the exported CSV; implies `--export-csv` |
+| Flag                  | Behavior                                                                                                                                                                                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| _(none)_              | Smart mode: only fetches games with missing scores                                                                                                                                                                                                                                    |
+| `--update`            | Fetch all configured games and refresh scores + averages regardless of existing data                                                                                                                                                                                                  |
+| `--dry-run`           | Run the check and fetch logic, print results, but do not write output                                                                                                                                                                                                                 |
+| `--debug`             | Save a screenshot and HTML dump for every page visited to `scripts/debug/<timestamp>/`                                                                                                                                                                                                |
+| `--show-status`       | Include a Status column in the printed results table                                                                                                                                                                                                                                  |
+| `--summary-only`      | Suppress informational logs and print only the results table plus errors                                                                                                                                                                                                              |
+| `--timezone <TZ>`     | Override local timezone detection for the midnight/Pacific-date warning, e.g. `--timezone America/New_York`                                                                                                                                                                           |
+| `--output <FILE>`     | Override the JSON store path. Precedence: `--output` > `output_path`/`output_json` in `config.json` > `$RESULTS_JSON` in `.env` (fallback) > `./results.json`                                                                                                                         |
+| `--export-csv`        | After writing the store, also regenerate the CSV view (same as `"export_csv_on_run": true` in `config.json`)                                                                                                                                                                          |
+| `--csv-output <FILE>` | Path for the exported CSV; implies `--export-csv`                                                                                                                                                                                                                                     |
+| `--sync-leaderboards` | Refresh connections-leaderboard data (`no_hints` / `no_mistakes` and every connection's `leaderboard_fetches`) for every game already played today, even if today's scores are complete. Loads only leaderboard pages (never results pages), so it is safe to re-run later in the day |
 
 Flags can be combined, e.g. `--update --dry-run` to do a full fetch and preview without writing.
 

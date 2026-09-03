@@ -14,11 +14,18 @@ Usage:
     python collector.py --no-finalize  # skip auto-finalization of yesterday's averages
     python collector.py --check-finalized       # audit last 30 days for unfinalized averages
     python collector.py --check-finalized 45 --yes  # audit 45 days and finalize any gaps
+    python collector.py --sync-leaderboards     # refresh connections leaderboards for all played games
 
 Each normal run automatically finalizes yesterday's averages before collecting today:
 it loads yesterday's results pages via ?gameUrn= (which show the post-midnight frozen
 average) and updates avg + avg_is_final in the JSON store.  Requires viewer_member_id
 in config.json.
+
+Connections leaderboards are scraped automatically for every game collected today:
+each game entry records whether the viewer finished with no hints / no mistakes
+(no_hints / no_mistakes) plus a leaderboard_fetches map of every connection's score
+and badges. Re-run `--sync-leaderboards` later in the day to refresh that data for
+all already-played games without touching scores or averages.
 
 viewer_member_id is auto-discovered from a played game's results page (no dev tools) and
 saved to config.json on first use.
@@ -47,9 +54,12 @@ except ImportError:
 
 from linkedin_scraper import (
     fetch_all_scores, fetch_final_averages, discover_viewer_member_id,
-    fetch_game_states, sleep_with_jitter, GameResult,
+    fetch_game_states, fetch_game_leaderboards, sleep_with_jitter, GameResult,
 )
-from json_writer import get_json_today_state, write_json, get_finalizable_games, write_final_averages
+from json_writer import (
+    get_json_today_state, read_results_data, write_json,
+    get_finalizable_games, write_final_averages,
+)
 from sheet_layout import load_layout
 from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE, GAMES
 
@@ -403,6 +413,110 @@ def _run_played_check() -> int:
     return 0
 
 
+def _run_sync_leaderboards(
+    args,
+    layout,
+    output_path: Path,
+    linkedin_date: date,
+    debug_dir: Path | None,
+) -> int:
+    """
+    Refresh connections-leaderboard data for every game already played today.
+
+    A normal collection scrapes a game's leaderboard only when that game is
+    collected; connections who play *later* in the day won't be seen until the
+    game is re-collected. --sync-leaderboards re-fetches each played game's
+    leaderboard regardless, updating no_hints / no_mistakes (the viewer's "You"
+    row) and leaderboard_fetches (every other connection's score/badges) without
+    touching score / avg / number — which come from the results pages.
+
+    A game counts as played when today's record has a score. Non-played games are
+    never loaded here: their leaderboard won't render, and loading an unplayed
+    game could start its timer.
+    """
+    key = linkedin_date.isoformat()
+    try:
+        data = read_results_data(output_path)
+    except Exception as exc:
+        logger.error(f"Could not read JSON store: {exc}")
+        return 1
+
+    rec = data.get(key) or {}
+    games = rec.get("games") or {}
+    game_by_key = {g["key"]: g for g in GAMES}
+
+    played: list[dict] = []
+    for game_key in layout.included_game_keys():
+        entry = games.get(game_key) or {}
+        if (entry.get("score") or "").strip():
+            g = game_by_key.get(game_key)
+            if g:
+                played.append(g)
+
+    if not played:
+        logger.info(
+            f"No games with recorded scores for {key} — nothing to sync. "
+            "Play today's games and run a normal collection first."
+        )
+        return 0
+
+    logger.info(
+        f"Syncing connections leaderboards for {len(played)} played game(s): "
+        + ", ".join(g["name"] for g in played)
+    )
+
+    delay = _resolve_delay(args, layout)
+    try:
+        results = fetch_game_leaderboards(played, debug_dir=debug_dir, delay=delay)
+    except FileNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+    except Exception as exc:
+        logger.error(f"Leaderboard sync failed: {exc}")
+        return 1
+
+    print()
+    print(
+        f"Connections leaderboard sync for "
+        f"{linkedin_date.strftime('%A, %B %d %Y')} (LinkedIn/Pacific date)"
+    )
+    header = f"{'Game':<22} {'You':<24} {'Connections'}"
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        if r.error:
+            you_txt = "error"
+        else:
+            flags = []
+            if r.no_hints:
+                flags.append("no hints")
+            if r.no_mistakes:
+                flags.append("no mistakes")
+            you_txt = ", ".join(flags) if flags else "—"
+        n = len(r.leaderboard_fetches) if r.leaderboard_fetches is not None else 0
+        print(f"{r.name:<22} {you_txt:<24} {n} connection(s)")
+    print()
+
+    synced = [r for r in results if r.leaderboard_fetches is not None]
+    if not synced:
+        logger.warning("No leaderboard data retrieved — store not updated.")
+        return 1
+
+    if args.dry_run:
+        logger.info("Dry run — store not updated.")
+        return 0
+
+    try:
+        write_json(synced, linkedin_date, output_path)
+    except Exception as exc:
+        logger.error(f"JSON write failed: {exc}")
+        return 1
+
+    _export_csv_if_requested(args, layout, output_path)
+    logger.info("Leaderboard sync complete.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch LinkedIn Games scores and record them in a local JSON store")
     parser.add_argument("--update",      action="store_true", help="Fetch all games and update scores + averages regardless of existing data")
@@ -451,6 +565,12 @@ def main() -> int:
                         help="Standalone diagnostic: print each game's played/unplayed state and "
                              "puzzle number from the consolidated GameEntryPoints endpoint, then "
                              "exit. Timer-safe (no game boards loaded); writes nothing.")
+    parser.add_argument("--sync-leaderboards", action="store_true",
+                        help="Refresh connections-leaderboard data (the viewer's no-hints/"
+                             "no-mistakes badges and every connection's score/badges) for each "
+                             "game already played today, even if today's scores are recorded. "
+                             "Loads only each game's leaderboard page (never results pages), so "
+                             "it is safe to re-run any time after playing.")
     args = parser.parse_args()
 
     if args.finalize and args.update:
@@ -464,6 +584,14 @@ def main() -> int:
         return 1
     if args.played_check and (args.finalize or args.update or args.dry_run or args.check_finalized is not None):
         logger.error("--played-check cannot be combined with other modes.")
+        return 1
+    if args.sync_leaderboards and (
+        args.finalize or args.update or args.played_check or args.check_finalized is not None
+    ):
+        logger.error(
+            "--sync-leaderboards cannot be combined with --finalize, --update, "
+            "--played-check, or --check-finalized."
+        )
         return 1
 
     if args.played_check:
@@ -513,9 +641,15 @@ def main() -> int:
             args, layout, output_path, linkedin_date, viewer_member_id, debug_dir
         )
 
+    # ── Standalone connections-leaderboard refresh (--sync-leaderboards) ───────
+    if args.sync_leaderboards:
+        return _run_sync_leaderboards(args, layout, output_path, linkedin_date, debug_dir)
+
     # ── Finalization (standalone --finalize mode or auto at start of normal run) ─
     yesterday = linkedin_date - timedelta(days=1)
-    _do_finalize = args.finalize or (not args.no_finalize and not args.update and not args.dry_run)
+    _do_finalize = args.finalize or (
+        not args.no_finalize and not args.update and not args.dry_run and not args.sync_leaderboards
+    )
     if args.dry_run and not args.no_finalize and not args.update:
         logger.info("--dry-run: skipping auto-finalization of yesterday's averages.")
 

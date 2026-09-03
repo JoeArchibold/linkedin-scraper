@@ -43,6 +43,31 @@ class GameResult:
     error: Optional[str] = None
     unplayed: bool = False  # True when the game hasn't been played yet today
 
+    # Connections-leaderboard data for today's puzzle, filled when the game was
+    # played and its leaderboard page was scraped. These are separate from
+    # score/avg/number so a refresh never disturbs the results-page values.
+    no_hints: Optional[bool] = None            # True when "You" had no hints
+    no_mistakes: Optional[bool] = None         # True when "You" had no mistakes
+    # Display name -> {"score":..., "no_hints": bool, "no_mistakes": bool}
+    # for every leaderboard row other than the viewer's.
+    leaderboard_fetches: Optional[dict] = None
+
+
+@dataclass
+class LeaderboardData:
+    """
+    Parsed view of one game's connections leaderboard for today.
+
+    viewer_no_hints / viewer_no_mistakes describe the viewer's own "You" row
+    (None when that row wasn't rendered/recognised). `others` maps every other
+    player's display name to a row dict — {"score", "no_hints", "no_mistakes"}
+    — in leaderboard (rank) order.
+    """
+
+    viewer_no_hints: Optional[bool] = None
+    viewer_no_mistakes: Optional[bool] = None
+    others: dict = field(default_factory=dict)
+
 
 @dataclass
 class GameState:
@@ -178,6 +203,166 @@ def _extract_from_html(html: str, game_name: str, is_time: bool) -> tuple[Option
     return None, None, number
 
 
+def _leaderboard_url(game: dict) -> str:
+    """
+    Connections-leaderboard URL for a game's results page, e.g.
+    .../games/tango/results/ -> .../games/tango/results/leaderboard/connections/.
+    Defaults to the "Today" tab, matching the day being collected.
+    """
+    return f"{game['url'].rstrip('/')}/leaderboard/connections/"
+
+
+def _parse_leaderboard_page(html: str) -> Optional[LeaderboardData]:
+    """
+    Parse a connections-leaderboard page's player rows.
+
+    Each row is a `.pr-connections-leaderboard-player__container` holding the
+    display name (`.pr-connections-leaderboard-player__name-text` — literally
+    "You" for the viewer), the score (`.pr-connections-leaderboard-player__score`)
+    and an optional badge line (`.pr-connections-leaderboard-player__subtitle-copy`)
+    such as "No hints & no mistakes!", "No hints!" or "No mistakes!". A missing
+    badge line means the player used hints/mistakes (both False). Rows outside
+    this list (e.g. the "nudge to play" section) use different classes and are
+    never matched.
+
+    Returns None when no player rows were rendered (page structure changed or
+    nothing loaded); otherwise a LeaderboardData with the viewer's row split out
+    from `others`.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    containers = soup.select(".pr-connections-leaderboard-player__container")
+    if not containers:
+        return None
+
+    viewer_no_hints: Optional[bool] = None
+    viewer_no_mistakes: Optional[bool] = None
+    others: dict = {}
+
+    for container in containers:
+        name_el = container.select_one(".pr-connections-leaderboard-player__name-text")
+        if not name_el:
+            continue
+        name = name_el.get_text(strip=True)
+        if not name:
+            continue
+
+        score_el = container.select_one(".pr-connections-leaderboard-player__score")
+        score = score_el.get_text(strip=True) if score_el else None
+
+        sub_el = container.select_one(".pr-connections-leaderboard-player__subtitle-copy")
+        subtitle = sub_el.get_text(strip=True) if sub_el else ""
+        no_hints = bool(re.search(r"no hints", subtitle, re.IGNORECASE))
+        no_mistakes = bool(re.search(r"no mistakes", subtitle, re.IGNORECASE))
+
+        if name == "You":
+            viewer_no_hints = no_hints
+            viewer_no_mistakes = no_mistakes
+            continue
+
+        others[name] = {
+            "score": score,
+            "no_hints": no_hints,
+            "no_mistakes": no_mistakes,
+        }
+
+    return LeaderboardData(
+        viewer_no_hints=viewer_no_hints,
+        viewer_no_mistakes=viewer_no_mistakes,
+        others=others,
+    )
+
+
+def _scroll_leaderboard_to_end(page: Page, max_scrolls: int = 25) -> None:
+    """
+    Connections leaderboards render lazily (`.scaffold-finite-scroll--infinite`),
+    so a low-ranked player — including the viewer's own row — may not be in the
+    DOM until the list is scrolled. Scroll the finite-scroll container (and the
+    window) to the bottom, letting rows load, until the row count stops growing
+    or `max_scrolls` passes are reached.
+    """
+    selector = ".pr-connections-leaderboard-player__container"
+    last_count = -1
+    stagnant = 0
+    for _ in range(max_scrolls):
+        try:
+            count = page.locator(selector).count()
+        except Exception:
+            return
+        try:
+            page.evaluate(
+                """() => {
+                    const el = document.querySelector('.scaffold-finite-scroll__content');
+                    if (el) el.scrollTop = el.scrollHeight;
+                    window.scrollTo(0, document.body.scrollHeight);
+                }"""
+            )
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+        try:
+            count = page.locator(selector).count()
+        except Exception:
+            return
+        if count > last_count:
+            last_count = count
+            stagnant = 0
+        else:
+            stagnant += 1
+            if stagnant >= 2:
+                break
+
+
+def _fetch_leaderboard(
+    page: Page,
+    game: dict,
+    debug_dir: Optional[Path] = None,
+) -> Optional[LeaderboardData]:
+    """
+    Navigate `page` to a game's connections leaderboard and parse the rows.
+
+    Returns None when the page redirected away, no rows rendered, or parsing
+    found nothing — callers treat that as "no leaderboard data this run" and
+    leave any previously-stored leaderboard fields untouched.
+    """
+    name = game["name"]
+    slug = name.lower().replace(" ", "_")
+    logger.info(f"Fetching {name} connections leaderboard ...")
+
+    try:
+        page.goto(_leaderboard_url(game), wait_until="domcontentloaded", timeout=20_000)
+
+        if "/results/leaderboard/" not in page.url:
+            logger.info(f"{name}: leaderboard unavailable (redirected to {page.url})")
+            return None
+
+        try:
+            page.wait_for_selector(".pr-connections-leaderboard-player__container", timeout=15_000)
+        except Exception:
+            logger.info(f"{name}: no leaderboard rows rendered")
+            return None
+
+        _scroll_leaderboard_to_end(page)
+        html = page.content()
+
+        if debug_dir:
+            _save_debug(page, debug_dir, f"{slug}_leaderboard", chiclets_found=True)
+
+        data = _parse_leaderboard_page(html)
+        if data is None:
+            logger.info(f"{name}: no leaderboard rows parsed")
+            return None
+
+        others_n = len(data.others)
+        you_txt = "found" if data.viewer_no_hints is not None else "not rendered"
+        logger.info(
+            f"{name}: leaderboard parsed (viewer row {you_txt}, {others_n} other player(s))"
+        )
+        return data
+    except Exception as exc:
+        logger.error(f"{name}: error fetching leaderboard — {exc}")
+        return None
+
+
 def _get_unplayed_names(page: Page) -> set[str]:
     """
     Parse the 'Play another game' section on a results page and return the
@@ -209,11 +394,17 @@ def _fetch_game(
     debug_dir: Optional[Path] = None,
     already_loaded: bool = False,
     game_urn: Optional[str] = None,
+    scrape_leaderboard: bool = False,
 ) -> GameResult:
     """Navigate to a single game results URL and extract score + avg.
 
     When game_urn is provided, appends ?gameUrn=<urn> to load a past puzzle's
     frozen results instead of today's live page.
+
+    When scrape_leaderboard is True and the game was played today (a score was
+    found), also loads the game's connections leaderboard and attaches the
+    viewer's no_hints/no_mistakes plus every other connection's row. A
+    leaderboard load that fails is logged but never fails the game result.
     """
     name    = game["name"]
     url     = game["url"]
@@ -255,7 +446,18 @@ def _fetch_game(
             num_str = f" #{number}" if number else ""
             logger.info(f"{name}{num_str}: score={score}, avg={avg}")
 
-        return GameResult(name=name, score=score, avg=avg, number=number)
+        result = GameResult(name=name, score=score, avg=avg, number=number)
+
+        # Connections leaderboard (today only, and only for a game that was
+        # actually played — the leaderboard won't render for an unplayed one).
+        if scrape_leaderboard and score is not None:
+            lb = _fetch_leaderboard(page, game, debug_dir=debug_dir)
+            if lb is not None:
+                result.no_hints = lb.viewer_no_hints
+                result.no_mistakes = lb.viewer_no_mistakes
+                result.leaderboard_fetches = lb.others
+
+        return result
 
     except Exception as exc:
         logger.error(f"{name}: error fetching results — {exc}")
@@ -660,7 +862,7 @@ def fetch_all_scores(
                     logger.info(f"{game['name']}: not yet played today — skipping")
                     fetched[game["name"]] = GameResult(name=game["name"], score=None, avg=None, unplayed=True)
                     continue
-                result = _fetch_game(page, game, debug_dir=debug_dir)
+                result = _fetch_game(page, game, debug_dir=debug_dir, scrape_leaderboard=True)
                 # Prefer the endpoint's authoritative puzzle number over the page's.
                 if result.score is not None and st.puzzle_number is not None:
                     endpoint_num = str(st.puzzle_number)
@@ -806,9 +1008,13 @@ def _fetch_all_scores_via_anchor(
                 fetched[game["name"]] = GameResult(name=game["name"], score=None, avg=None, unplayed=True)
             elif game["name"] == anchor["name"] and "/results/" in page.url:
                 # Anchor page is already loaded — extract directly without re-navigating
-                fetched[game["name"]] = _fetch_game(page, game, debug_dir=debug_dir, already_loaded=True)
+                fetched[game["name"]] = _fetch_game(
+                    page, game, debug_dir=debug_dir, already_loaded=True, scrape_leaderboard=True
+                )
             else:
-                fetched[game["name"]] = _fetch_game(page, game, debug_dir=debug_dir)
+                fetched[game["name"]] = _fetch_game(
+                    page, game, debug_dir=debug_dir, scrape_leaderboard=True
+                )
 
         browser.close()
 
@@ -817,4 +1023,63 @@ def _fetch_all_scores_via_anchor(
     for game in layout_games:
         results.append(fetched.get(game["name"], GameResult(name=game["name"], score=None, avg=None)))
 
+    return results
+
+
+def fetch_game_leaderboards(
+    games: list[dict],
+    debug_dir: Optional[Path] = None,
+    delay: float = 0.0,
+) -> list[GameResult]:
+    """
+    Refresh-only entry point for `--sync-leaderboards`: load the connections
+    leaderboard for each played game in `games` and return GameResults carrying
+    ONLY leaderboard data (no_hints / no_mistakes / leaderboard_fetches).
+
+    score / avg / number are left None on purpose so a refresh never touches the
+    values that come from the game's results page — write_json only overwrites
+    fields that are not None.
+
+    games: game config dicts (from GAMES) for games already played today.
+    delay: seconds (jittered) to pause between each game's leaderboard load.
+    """
+    linkedin_state = get_linkedin_state()
+    if linkedin_state is None:
+        raise FileNotFoundError(
+            "LinkedIn session not found. Run setup_auth.py first."
+        )
+
+    results: list[GameResult] = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context: BrowserContext = browser.new_context(
+            storage_state=linkedin_state,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
+        for i, game in enumerate(games):
+            if i:
+                sleep_with_jitter(delay)
+            data = _fetch_leaderboard(page, game, debug_dir=debug_dir)
+            if data is None:
+                results.append(
+                    GameResult(name=game["name"], score=None, avg=None, error="leaderboard unavailable")
+                )
+            else:
+                results.append(
+                    GameResult(
+                        name=game["name"],
+                        score=None,
+                        avg=None,
+                        no_hints=data.viewer_no_hints,
+                        no_mistakes=data.viewer_no_mistakes,
+                        leaderboard_fetches=data.others,
+                    )
+                )
+        browser.close()
     return results
