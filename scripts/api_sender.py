@@ -8,8 +8,10 @@ connection. The leaderboard API reads all players' scores from
 badges into that map under the configured ``leaderboard_player_name``.
 
 The endpoint is read from the LEADERBOARD_API_URL environment variable (see
-.env.example). When unset, posting is a no-op so collection stays self-contained.
-A failed push is logged as a warning and does not change the collector's exit
+.env.example). The API requires authentication, so the shared-secret bearer token
+is read from LEADERBOARD_API_TOKEN and sent as ``Authorization: Bearer <token>``.
+When either is unset, posting is a no-op so collection stays self-contained. A
+failed push is logged as a warning and does not change the collector's exit
 status — the local JSON store remains the source of truth.
 """
 
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent / ".env")
 
 API_URL_ENV = "LEADERBOARD_API_URL"
+API_TOKEN_ENV = "LEADERBOARD_API_TOKEN"
 REQUEST_TIMEOUT_SECONDS = 60
 
 
@@ -34,6 +37,12 @@ def get_api_url() -> str | None:
     """Return the configured API URL, or None when unset/blank."""
     url = (os.getenv(API_URL_ENV) or "").strip()
     return url or None
+
+
+def get_api_token() -> str | None:
+    """Return the shared-secret bearer token, or None when unset/blank."""
+    token = (os.getenv(API_TOKEN_ENV) or "").strip()
+    return token or None
 
 
 def build_api_payload(date_str: str, day_record: dict, player_name: str) -> dict:
@@ -72,13 +81,16 @@ def build_api_payload(date_str: str, day_record: dict, player_name: str) -> dict
     return {"date": date_str, "games": games}
 
 
-def _post_json(payload: dict, api_url: str) -> None:
-    """POST JSON to api_url, raising on transport or HTTP errors."""
+def _post_json(payload: dict, api_url: str, token: str) -> None:
+    """POST JSON to api_url with a bearer token, raising on transport/HTTP errors."""
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         api_url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
@@ -93,8 +105,8 @@ def push_day(output_path: Path, day: date, player_name: str) -> bool:
 
     Never raises: a failure is logged as a warning and reported via the return
     value (True only on a successful POST), so collection continues either way.
-    Returns False (and logs) when the API URL is unset, the day has no data, the
-    player name is unset, or the POST fails.
+    Returns False (and logs) when the player name, API URL, or bearer token is
+    unset, the day has no data, or the POST fails.
     """
     if not player_name:
         logger.warning(
@@ -106,6 +118,15 @@ def push_day(output_path: Path, day: date, player_name: str) -> bool:
     api_url = get_api_url()
     if not api_url:
         logger.info("%s not set - skipping API push for %s.", API_URL_ENV, day.isoformat())
+        return False
+
+    token = get_api_token()
+    if not token:
+        logger.warning(
+            "%s not set - skipping API push for %s (the leaderboard API requires auth).",
+            API_TOKEN_ENV,
+            day.isoformat(),
+        )
         return False
 
     try:
@@ -132,7 +153,7 @@ def push_day(output_path: Path, day: date, player_name: str) -> bool:
         return False
 
     try:
-        _post_json(payload, api_url)
+        _post_json(payload, api_url, token)
     except Exception as exc:
         logger.warning("Could not push %s to leaderboard API: %s", day.isoformat(), exc)
         return False
