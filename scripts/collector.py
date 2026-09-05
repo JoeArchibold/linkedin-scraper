@@ -30,6 +30,13 @@ all already-played games without touching scores or averages.
 viewer_member_id is auto-discovered from a played game's results page (no dev tools) and
 saved to config.json on first use.
 
+After a successful run, the collector POSTs the day's results to the leaderboard
+API (see api_sender.py) so the database stays in sync. The current LinkedIn date
+is pushed once it is written, and a second push sends any *newly finalized*
+averages (yesterday's) whenever finalization updated them. Both are gated on
+LEADERBOARD_API_URL in .env and leaderboard_player_name in config.json; a failed
+push is logged as a warning and never fails the run.
+
 Played/unplayed detection and today's puzzle numbers come from one consolidated
 GameEntryPoints Voyager call (see --played-check); the older anchor-results-page method
 remains as an automatic fallback when that endpoint is unavailable.
@@ -60,6 +67,7 @@ from json_writer import (
     get_json_today_state, read_results_data, write_json,
     get_finalizable_games, write_final_averages,
 )
+from api_sender import push_day
 from sheet_layout import load_layout
 from config import DEFAULT_OUTPUT_PATH, DEFAULT_RESULTS_CSV, SCRIPTS_DIR, CONFIG_FILE, GAMES
 
@@ -373,6 +381,8 @@ def _run_check_finalized(
         finalized_any = finalized_any or changed
         if not ok:
             failed_days.append(d)
+        elif changed:
+            push_day(output_path, d, layout.leaderboard_player_name())
 
     if finalized_any:
         _export_csv_if_requested(args, layout, output_path)
@@ -511,6 +521,7 @@ def _run_sync_leaderboards(
     except Exception as exc:
         logger.error(f"JSON write failed: {exc}")
         return 1
+    push_day(output_path, linkedin_date, layout.leaderboard_player_name())
 
     _export_csv_if_requested(args, layout, output_path)
     logger.info("Leaderboard sync complete.")
@@ -692,6 +703,7 @@ def main() -> int:
                 logger.warning(msg)
 
         finalize_ok = True
+        changed = False
         if viewer_member_id:
             finalize_ok, changed = _run_finalizer(
                 fin_date, output_path, viewer_member_id, debug_dir,
@@ -699,6 +711,7 @@ def main() -> int:
             )
             if changed:
                 _export_csv_if_requested(args, layout, output_path)
+                push_day(output_path, fin_date, layout.leaderboard_player_name())
 
         if args.finalize:
             if finalize_ok:
@@ -772,6 +785,7 @@ def main() -> int:
     except Exception as exc:
         logger.error(f"JSON write failed: {exc}")
         return 1
+    push_day(output_path, linkedin_date, layout.leaderboard_player_name())
 
     # ── Optional CSV export ────────────────────────────────────────────────────
     # Triggered by --export-csv/--csv-output, or by "export_csv_on_run": true in

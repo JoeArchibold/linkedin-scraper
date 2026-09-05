@@ -77,6 +77,15 @@ class Layout:
                 return g["name"]
         return None
 
+    def leaderboard_player_name(self) -> str:
+        """
+        The player name used to record the running user's own score in the
+        leaderboard API body's leaderboard_fetches (leaderboard_player_name in
+        config.json). Empty string when unset, in which case API pushes are
+        skipped.
+        """
+        return (self.raw.get("leaderboard_player_name") or "").strip()
+
     def included_game_keys(self) -> list[str]:
         """Game keys present in the layout, in column order."""
         seen: list[str] = []
