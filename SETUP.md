@@ -15,6 +15,12 @@ During development of the script, Python 3.14.2 was used.
 
 ## Setting up dependencies
 
+> **Tip:** the easiest way is to run the one-shot bootstrap from the `scripts/`
+> directory — `python setup.py` — which creates the venv, installs requirements +
+> Chromium, and seeds `.env`/`config.json` from the samples. Then launch via
+> `python run.py [args...]`. The manual steps below are equivalent and documented
+> for reference.
+
 The following commands can be used to set up the virtual environment, and install depdencies:
 
 ### Windows (PowerShell)
