@@ -10,30 +10,23 @@ Claude Code skill.  If you wish to use this as a skill, clone the repo to the
 `~/.claude/skills/linkedin-games-data-collector` folder.
 
 # Quick Start
-This script requires Python 3.10 or later to run.  Using a virtual environment (VENV)
-is highly recommended.  For OS-specific VENV setup instructions, refer to [this page](https://docs.python.org/3/library/venv.html).  
 
-* Clone the repo to any folder and run the following commands from its `scripts` directory to install dependencies:
-```
-pip install -r requirements.txt
-playwright install chromium
-```
-
-For headless operation, it will be necessary to manually log into LinkedIn in the
-Chromium browser one time using the following command:
+Requires Python 3.10 or later. From the project's `scripts/` directory:
 
 ```
-python setup_auth.py
-```
-Your LinkedIn session token will be stored encrypted using Fernet encryption in the 
-[PYCA Cryptography library](https://cryptography.io/en/latest/), with the decryption key 
-located in your operating system's credential store.  
-
-## Running the script
-To verify that the script is running properly, use the following command:
-```
-python collector.py --dry-run
+python setup.py                    # one-time: venv + deps + Chromium + seed config
+python setup_auth.py               # one-time: log in to LinkedIn
+python run.py --dry-run --summary-only
+python run.py                      # collect today's scores
 ```
 
-For full instructions and documentation of the available configuration options, see the
-`SETUP.md` file.
+- `setup.py` is idempotent and safe to re-run; it creates a virtual environment,
+  installs dependencies + the Playwright Chromium browser, and copies
+  `.env.example → .env` and `config.json.sample → config.json` if they're missing.
+- `setup_auth.py` opens a browser to log in; the session is stored encrypted (Fernet)
+  with the key in your OS credential store. Needed once per machine.
+- `run.py` is a thin cross-platform launcher that runs `collector.py` through the
+  venv and passes any extra arguments through (e.g. `python run.py --update`).
+
+If you'd rather set things up by hand (or use a different venv), the manual steps
+and all configuration options are documented in `SETUP.md`.
