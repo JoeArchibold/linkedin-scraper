@@ -15,7 +15,7 @@ Requires Python 3.10 or later. From the project's `scripts/` directory:
 
 ```
 python setup.py                    # one-time: venv + deps + Chromium + seed config
-python setup_auth.py               # one-time: log in to LinkedIn
+python run.py setup_auth           # one-time: log in to LinkedIn
 python run.py --dry-run --summary-only
 python run.py                      # collect today's scores
 ```
@@ -23,10 +23,10 @@ python run.py                      # collect today's scores
 - `setup.py` is idempotent and safe to re-run; it creates a virtual environment,
   installs dependencies + the Playwright Chromium browser, and copies
   `.env.example → .env` and `config.json.sample → config.json` if they're missing.
-- `setup_auth.py` opens a browser to log in; the session is stored encrypted (Fernet)
-  with the key in your OS credential store. Needed once per machine.
-- `run.py` is a thin cross-platform launcher that runs `collector.py` through the
-  venv and passes any extra arguments through (e.g. `python run.py --update`).
+- `run.py` is a thin cross-platform launcher that runs a `scripts/` entry point
+  through the venv. `python run.py setup_auth` logs in once (the session is stored
+  encrypted with Fernet, key in your OS credential store); bare `python run.py` runs
+  the daily collection, and extra arguments pass through (e.g. `python run.py --update`).
 
 If you'd rather set things up by hand (or use a different venv), the manual steps
 and all configuration options are documented in `SETUP.md`.

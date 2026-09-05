@@ -89,7 +89,7 @@ def main() -> int:
 
     print()
     print("Done. Next steps:")
-    print("  1. Log in to LinkedIn once:      python setup_auth.py")
+    print("  1. Log in to LinkedIn once:      python run.py setup_auth")
     print("  2. Check it works:               python run.py --dry-run --summary-only")
     print("  3. Run the daily collection:     python run.py")
     print()
