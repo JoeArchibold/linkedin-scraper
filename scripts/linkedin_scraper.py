@@ -47,7 +47,7 @@ class GameResult:
     # played and its leaderboard page was scraped. These are separate from
     # score/avg/number so a refresh never disturbs the results-page values.
     no_hints: Optional[bool] = None            # True when "You" had no hints
-    no_mistakes: Optional[bool] = None         # True when "You" had no mistakes
+    no_mistakes: Optional[bool] = None         # True when "You" had no mistakes/backtracks
     # Display name -> {"score":..., "no_hints": bool, "no_mistakes": bool}
     # for every leaderboard row other than the viewer's.
     leaderboard_fetches: Optional[dict] = None
@@ -220,10 +220,10 @@ def _parse_leaderboard_page(html: str) -> Optional[LeaderboardData]:
     display name (`.pr-connections-leaderboard-player__name-text` — literally
     "You" for the viewer), the score (`.pr-connections-leaderboard-player__score`)
     and an optional badge line (`.pr-connections-leaderboard-player__subtitle-copy`)
-    such as "No hints & no mistakes!", "No hints!" or "No mistakes!". A missing
-    badge line means the player used hints/mistakes (both False). Rows outside
-    this list (e.g. the "nudge to play" section) use different classes and are
-    never matched.
+    such as "No hints & no mistakes!", "No hints!", "No mistakes!" or (zip)
+    "No backtracks!". A missing badge line means the player used hints/mistakes
+    (both False). Rows outside this list (e.g. the "nudge to play" section) use
+    different classes and are never matched.
 
     Returns None when no player rows were rendered (page structure changed or
     nothing loaded); otherwise a LeaderboardData with the viewer's row split out
@@ -252,7 +252,9 @@ def _parse_leaderboard_page(html: str) -> Optional[LeaderboardData]:
         sub_el = container.select_one(".pr-connections-leaderboard-player__subtitle-copy")
         subtitle = sub_el.get_text(strip=True) if sub_el else ""
         no_hints = bool(re.search(r"no hints", subtitle, re.IGNORECASE))
-        no_mistakes = bool(re.search(r"no mistakes", subtitle, re.IGNORECASE))
+        # Zip labels a mistake-free run "No backtracks!" rather than "No
+        # mistakes!", so accept both phrasings for the no_mistakes badge.
+        no_mistakes = bool(re.search(r"no mistakes|no backtracks", subtitle, re.IGNORECASE))
 
         if name == "You":
             viewer_no_hints = no_hints
