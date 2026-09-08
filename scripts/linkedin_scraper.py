@@ -220,8 +220,8 @@ def _parse_leaderboard_page(html: str) -> Optional[LeaderboardData]:
     display name (`.pr-connections-leaderboard-player__name-text` — literally
     "You" for the viewer), the score (`.pr-connections-leaderboard-player__score`)
     and an optional badge line (`.pr-connections-leaderboard-player__subtitle-copy`)
-    such as "No hints & no mistakes!", "No hints!", "No mistakes!" or (zip)
-    "No backtracks!". A missing badge line means the player used hints/mistakes
+    such as "No hints & no mistakes!", "No hints!", "No mistakes!" or other "no mistakes"
+    phrasings, for different agmes. A missing badge line means the player used hints/mistakes
     (both False). Rows outside this list (e.g. the "nudge to play" section) use
     different classes and are never matched.
 
@@ -252,9 +252,8 @@ def _parse_leaderboard_page(html: str) -> Optional[LeaderboardData]:
         sub_el = container.select_one(".pr-connections-leaderboard-player__subtitle-copy")
         subtitle = sub_el.get_text(strip=True) if sub_el else ""
         no_hints = bool(re.search(r"no hints", subtitle, re.IGNORECASE))
-        # Zip labels a mistake-free run "No backtracks!" rather than "No
-        # mistakes!", so accept both phrasings for the no_mistakes badge.
-        no_mistakes = bool(re.search(r"no mistakes|no backtracks", subtitle, re.IGNORECASE))
+        # Accept all phrasings for the no_mistakes badge.
+        no_mistakes = bool(re.search(r"no mistakes|no backtracks|no redraws", subtitle, re.IGNORECASE))
 
         if name == "You":
             viewer_no_hints = no_hints
