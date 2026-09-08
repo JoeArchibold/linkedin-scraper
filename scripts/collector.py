@@ -435,10 +435,14 @@ def _run_sync_leaderboards(
 
     A normal collection scrapes a game's leaderboard only when that game is
     collected; connections who play *later* in the day won't be seen until the
-    game is re-collected. --sync-leaderboards re-fetches each played game's
+    game is re-collected. This function re-fetches each played game's
     leaderboard regardless, updating no_hints / no_mistakes (the viewer's "You"
     row) and leaderboard_fetches (every other connection's score/badges) without
     touching score / avg / number — which come from the results pages.
+
+    Reached via --sync-leaderboards (standalone), and also run automatically at
+    the end of every default collection so all played games stay fresh — not just
+    the newly collected ones.
 
     A game counts as played when today's record has a score. Non-played games are
     never loaded here: their leaderboard won't render, and loading an unplayed
@@ -577,11 +581,11 @@ def main() -> int:
                              "puzzle number from the consolidated GameEntryPoints endpoint, then "
                              "exit. Timer-safe (no game boards loaded); writes nothing.")
     parser.add_argument("--sync-leaderboards", action="store_true",
-                        help="Refresh connections-leaderboard data (the viewer's no-hints/"
-                             "no-mistakes badges and every connection's score/badges) for each "
-                             "game already played today, even if today's scores are recorded. "
-                             "Loads only each game's leaderboard page (never results pages), so "
-                             "it is safe to re-run any time after playing.")
+                        help="Standalone mode: refresh connections-leaderboard data (the viewer's "
+                             "no-hints/no-mistakes badges and every connection's score/badges) for "
+                             "each game already played today, without collecting today's scores. "
+                             "A default run already syncs leaderboards for every played game, so "
+                             "this is only needed to re-run the sync on its own.")
     args = parser.parse_args()
 
     if args.finalize and args.update:
@@ -736,9 +740,13 @@ def main() -> int:
         names_to_fetch = None                           # no row yet — fetch all
         logger.info("No row for today — fetching all games")
     elif not missing_games:
-        logger.info("All games already recorded for today. Nothing to do.")
-        logger.info("Use --update to refresh scores and averages anyway.")
-        return 0
+        if args.dry_run:
+            logger.info("All games already recorded for today. Nothing to do.")
+            logger.info("Use --update to refresh scores and averages anyway.")
+            return 0
+        logger.info("All games already recorded for today. Refreshing connections "
+                    "leaderboards for every played game.")
+        return _run_sync_leaderboards(args, layout, output_path, linkedin_date, debug_dir)
     else:
         names_to_fetch = set(missing_games)
         logger.info(f"Fetching {len(missing_games)} game(s) with missing scores: {', '.join(missing_games)}")
@@ -786,6 +794,13 @@ def main() -> int:
         logger.error(f"JSON write failed: {exc}")
         return 1
     push_day(output_path, linkedin_date, layout.leaderboard_player_name())
+
+    # A default run also refreshes leaderboards for every played game — not just
+    # the newly collected ones — so connections who played later in the day are
+    # captured even when their game wasn't re-collected today. This re-pushes the
+    # refreshed day and regenerates the CSV (if configured).
+    if not args.update:
+        return _run_sync_leaderboards(args, layout, output_path, linkedin_date, debug_dir)
 
     # ── Optional CSV export ────────────────────────────────────────────────────
     # Triggered by --export-csv/--csv-output, or by "export_csv_on_run": true in
