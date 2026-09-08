@@ -90,6 +90,10 @@ def _post_json(payload: dict, api_url: str, token: str) -> None:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
+            # Cloudflare (in front of the tunnel) flags urllib's default
+            # "Python-urllib/x.y" user-agent as a bot, answering 403. Send a
+            # browser-like UA so the ingest POST gets through.
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         },
         method="POST",
     )
